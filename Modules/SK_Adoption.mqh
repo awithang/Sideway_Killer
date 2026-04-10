@@ -10,6 +10,7 @@
 #include "SK_DataTypes.mqh"
 #include "SK_GVSchema.mqh"
 #include "SK_SSoT.mqh"
+#include "SK_Safety.mqh"
 
 //+==================================================================+
 //| POSITION ADOPTION SYSTEM — Configurable Smart Adaptive Protocol   |
@@ -48,6 +49,17 @@ struct PositionTracking
 PositionTracking g_posTracking[256];
 int              g_trackingCount = 0;
 
+//--- User command tracking (in-memory, since MQL5 can't modify position comments)
+struct CommandTracking
+{
+   ulong    ticket;
+   string   command;      // "NOADOPT", "FORCE", "CLEAR"
+   datetime issuedAt;
+   bool     processed;
+};
+CommandTracking  g_commands[256];
+int              g_commandCount = 0;
+
 //--- Spread history buffer
 double           g_spreadHistory[100];
 int              g_spreadHistoryIndex = 0;
@@ -69,6 +81,7 @@ int              g_adoptionAtrHandle100 = INVALID_HANDLE;
 bool Adoption_Init()
 {
    g_trackingCount = 0;
+   g_commandCount = 0;
 
    //--- Initialize tracking array
    for(int i = 0; i < 256; i++)
@@ -76,6 +89,11 @@ bool Adoption_Init()
       g_posTracking[i].ticket = 0;
       g_posTracking[i].firstSeen = 0;
       g_posTracking[i].processed = false;
+
+      g_commands[i].ticket = 0;
+      g_commands[i].command = "";
+      g_commands[i].issuedAt = 0;
+      g_commands[i].processed = false;
      }
 
    //--- Initialize spread history
@@ -115,6 +133,7 @@ void Adoption_Deinit()
       IndicatorRelease(g_adoptionAtrHandle100);
 
    g_trackingCount = 0;
+   g_commandCount = 0;
 
    Print("[Adoption] Deinitialized");
 }
@@ -261,14 +280,10 @@ int Adoption_AdoptPosition(const ulong ticket)
             g_baskets[basketIndex].basketId,
             " (", (direction == 0 ? "BUY" : "SELL"), " ", lots, " lots @ ",
             DoubleToString(openPrice, 5), ")");
-      Alert("[SIDEWAY KILLER] Basket created: ",
-            g_baskets[basketIndex].basketId,
-            " adopted position ", ticket);
      }
    else
      {
       Print("[Adoption] ERROR: Failed to create basket for ticket ", ticket);
-      Alert("[SIDEWAY KILLER] ERROR: Failed to adopt position ", ticket);
      }
 
    return basketIndex;
@@ -303,8 +318,10 @@ bool Adoption_MeetsBaseCriteria(const ulong ticket, AdoptionResult &result)
    //--- CRITERION 3: Must be in loss
    double profit = PositionGetDouble(POSITION_PROFIT);
    double swap = PositionGetDouble(POSITION_SWAP);
-   double commission = PositionGetDouble(POSITION_COMMISSION);
-   double netPnL = profit + swap + commission;
+   //--- Commission: estimate from volume × $7/lot round-turn (avoid deprecated POSITION_COMMISSION)
+   double volume = PositionGetDouble(POSITION_VOLUME);
+   double commission = volume * 7.0;
+   double netPnL = profit + swap - commission;
 
    if(netPnL >= 0)
      {
@@ -502,7 +519,7 @@ bool Adoption_IsPriceStable(const ulong ticket, const int secondsWindow)
    double priceNow = Adoption_GetCurrentPrice(direction);
 
    //--- Get historical price from M1 bars
-   int barsToCheck = MathCeil(secondsWindow / 60.0) + 1;
+   int barsToCheck = (int)MathCeil(secondsWindow / 60.0) + 1;
    if(barsToCheck < 1)
       barsToCheck = 1;
 
@@ -534,7 +551,8 @@ void Adoption_UpdateMarketState()
    //--- Get ATR values from handles
    if(g_adoptionAtrHandle14 != INVALID_HANDLE)
      {
-      double buf[1];
+      double buf[];
+      ArrayResize(buf, 1);
       ArraySetAsSeries(buf, true);
       if(CopyBuffer(g_adoptionAtrHandle14, 0, 0, 1, buf) > 0)
          atr14 = buf[0];
@@ -542,10 +560,11 @@ void Adoption_UpdateMarketState()
 
    if(g_adoptionAtrHandle100 != INVALID_HANDLE)
      {
-      double buf[1];
-      ArraySetAsSeries(buf, true);
-      if(CopyBuffer(g_adoptionAtrHandle100, 0, 0, 1, buf) > 0)
-         atr100 = buf[0];
+      double buf2[];
+      ArrayResize(buf2, 1);
+      ArraySetAsSeries(buf2, true);
+      if(CopyBuffer(g_adoptionAtrHandle100, 0, 0, 1, buf2) > 0)
+         atr100 = buf2[0];
      }
 
    //--- Store in market state
@@ -647,64 +666,62 @@ void Adoption_ScanUserCommands()
          continue;
 
       //--- Trim whitespace to prevent mismatches
-      comment = StringTrimLeft(comment);
-      comment = StringTrimRight(comment);
+      comment = Adoption_StringTrim(comment);
       if(comment == "")
          continue;
 
-      //--- Check for processed flag to avoid re-processing
-      if(StringFind(comment, "[PROCESSED]") >= 0)
+      //--- Check if already processed (in-memory)
+      if(Adoption_CommandAlreadyProcessed(ticket))
          continue;
 
       //--- Parse commands
       if(comment == "NOADOPT")
         {
          Adoption_AddExclusion(ticket);
-         string newComment = Adoption_BuildProcessedComment(comment);
-         if(!PositionSetString(POSITION_COMMENT, newComment))
-            Print("[Adoption] WARNING: Failed to set comment on ticket ", ticket,
-                  " err=", GetLastError());
+         Adoption_RecordCommand(ticket, "NOADOPT");
          Print("[Adoption] Ticket ", ticket, " EXCLUDED from adoption");
         }
       else if(comment == "FORCE")
         {
          Adoption_AddForce(ticket);
-         string newComment = Adoption_BuildProcessedComment(comment);
-         if(!PositionSetString(POSITION_COMMENT, newComment))
-            Print("[Adoption] WARNING: Failed to set comment on ticket ", ticket,
-                  " err=", GetLastError());
+         Adoption_RecordCommand(ticket, "FORCE");
          Print("[Adoption] Ticket ", ticket, " MARKED FOR FORCE adoption");
         }
       else if(comment == "CLEAR")
         {
          Adoption_ClearOverrides(ticket);
-         string newComment = Adoption_BuildProcessedComment(comment);
-         if(!PositionSetString(POSITION_COMMENT, newComment))
-            Print("[Adoption] WARNING: Failed to set comment on ticket ", ticket,
-                  " err=", GetLastError());
+         Adoption_RecordCommand(ticket, "CLEAR");
          Print("[Adoption] Ticket ", ticket, " overrides CLEARED");
         }
      }
 }
 
-//+------------------------------------------------------------------+
-//| Build a processed comment within the 31-character limit            |
-//| @param original  Original comment text                            |
-//| @return Truncated comment + " [PROCESSED]" (max 31 chars)          |
-//+------------------------------------------------------------------+
-string Adoption_BuildProcessedComment(const string original)
+/**
+ * Check if a command has already been processed for a ticket
+ */
+bool Adoption_CommandAlreadyProcessed(const ulong ticket)
 {
-   const string PROCESSED_FLAG = " [PROCESSED]";
-   const int MAX_COMMENT_LEN = 31;
+   for(int i = 0; i < g_commandCount; i++)
+     {
+      if(g_commands[i].ticket == ticket && g_commands[i].processed)
+         return true;
+     }
+   return false;
+}
 
-   int maxOriginalLen = MAX_COMMENT_LEN - StringLen(PROCESSED_FLAG);
-   if(maxOriginalLen < 1)
-      maxOriginalLen = 1;
-
-   if(StringLen(original) > maxOriginalLen)
-      return StringSubstr(original, 0, maxOriginalLen) + PROCESSED_FLAG;
-
-   return original + PROCESSED_FLAG;
+/**
+ * Record a user command in memory
+ */
+void Adoption_RecordCommand(const ulong ticket, const string command)
+{
+   if(g_commandCount < 256)
+     {
+      g_commands[g_commandCount].ticket = ticket;
+      g_commands[g_commandCount].command = command;
+      g_commands[g_commandCount].issuedAt = TimeCurrent();
+      g_commands[g_commandCount].processed = true;
+      g_commandCount++;
+     }
 }
 
 /**
@@ -913,6 +930,32 @@ int Adoption_GetTrackingIndex(const ulong ticket)
      }
 
    return -1;  // No space
+}
+
+//+------------------------------------------------------------------+
+//| STRING UTILITIES                                                   |
+//+------------------------------------------------------------------+
+
+/**
+ * Trim leading and trailing whitespace from a string
+ * @param text  Input string
+ * @return Trimmed string
+ */
+string Adoption_StringTrim(const string text)
+{
+   string result = text;
+   int len = StringLen(result);
+
+   //--- Trim leading
+   while(len > 0 && StringGetCharacter(result, 0) <= 32)
+      result = StringSubstr(result, 1);
+
+   //--- Trim trailing
+   len = StringLen(result);
+   while(len > 0 && StringGetCharacter(result, len - 1) <= 32)
+      result = StringSubstr(result, 0, len - 1);
+
+   return result;
 }
 
 //+------------------------------------------------------------------+

@@ -36,8 +36,8 @@ double  g_fsPrevSpread = 10.0;            // Previous spread for rate detection
 datetime g_fsLastSpikeCheck = 0;
 
 //--- Layer 3 API cache (optional, cold path only)
-double  g_fsApiCache[MAX_BASKETS];
-datetime g_fsApiCacheTime[MAX_BASKETS];
+double  g_fsApiCache[SK_MAX_BASKETS];
+datetime g_fsApiCacheTime[SK_MAX_BASKETS];
 
 //--- Performance tracking
 ulong   g_fsTotalChecks = 0;
@@ -455,6 +455,20 @@ bool FastStrike_PreExecutionVerify(const int basketIndex, const double bid,
 }
 
 //+------------------------------------------------------------------+
+//| FILLING MODE HELPER — Auto-detect broker support for close orders  |
+//+------------------------------------------------------------------+
+
+ENUM_ORDER_TYPE_FILLING FastStrike_GetFillingMode()
+{
+   long fillingMask = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((fillingMask & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      return ORDER_FILLING_FOK;
+   if((fillingMask & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      return ORDER_FILLING_IOC;
+   return ORDER_FILLING_FOK;  // Default fallback
+}
+
+//+------------------------------------------------------------------+
 //| EXECUTION — Close Basket Immediate                                  |
 //| Highest priority operation — executes the close sequence            |
 //+------------------------------------------------------------------+
@@ -502,9 +516,6 @@ void FastStrike_CloseBasketImmediate(const int basketIndex)
 
    Print("[FastStrike] Basket ", basketId, " CLOSED. Positions closed: ",
          closedCount, "/", levels, " | Profit: $", DoubleToString(actualProfit, 2));
-
-   Alert("[SIDEWAY KILLER] Basket ", basketId, " CLOSED — Profit: $",
-         DoubleToString(actualProfit, 2));
 }
 
 /**
@@ -543,14 +554,14 @@ bool FastStrike_ClosePosition(const ulong ticket)
    request.price = price;
    request.deviation = 10;  // 10 points max slippage
    request.magic = 0;
-   request.type_filling = ORDER_FILLING_IOC;  // Immediate-or-Cancel for speed
+   request.type_filling = FastStrike_GetFillingMode();  // Auto-detect broker support
 
    if(!OrderSend(request, result))
      {
       Print("[FastStrike] ERROR: Failed to close position ", ticket,
             " | Error: ", GetLastError(), " | Retcode: ", result.retcode);
 
-      //--- Retry with FOK filling if IOC failed
+      //--- Retry with FOK filling if first attempt failed
       request.type_filling = ORDER_FILLING_FOK;
       if(!OrderSend(request, result))
         {

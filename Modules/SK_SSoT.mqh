@@ -284,12 +284,27 @@ int SSoT_GetDirection(const int index)
  */
 void SSoT_RefreshCacheFromGlobals()
 {
-   int loaded = 0;
-
    //--- Read global state first
    SSoT_ReadGlobalStateFromGVs();
 
-   //--- Scan for active baskets
+   //--- PRESERVE fresh baskets (created < 5s ago) that might not have GVs yet
+   //--- This prevents the 'Ghost Basket' wipe after manual trade creation
+   BasketCache preservedBaskets[];
+   ArrayResize(preservedBaskets, SK_MAX_BASKETS);
+   int preservedCount = 0;
+   const int FRESH_WINDOW_SECONDS = 5;
+
+   for(int i = 0; i < g_basketCount; i++)
+     {
+      if(g_baskets[i].isValid && (TimeCurrent() - g_baskets[i].created < FRESH_WINDOW_SECONDS))
+        {
+         preservedBaskets[preservedCount] = g_baskets[i];
+         preservedCount++;
+        }
+     }
+
+   //--- Load baskets from GVs (standard behavior)
+   int loaded = 0;
    for(ulong id = 1; id <= (ulong)SK_MAX_BASKETS && loaded < SK_MAX_BASKETS; id++)
      {
       string statusName = GV_Name(id, GV_BASKET_STATUS);
@@ -322,6 +337,33 @@ void SSoT_RefreshCacheFromGlobals()
 
          loaded++;
         }
+     }
+
+   //--- MERGE: add preserved fresh baskets that weren't loaded from GVs
+   for(int i = 0; i < preservedCount; i++)
+     {
+      bool alreadyLoaded = false;
+      for(int j = 0; j < loaded; j++)
+        {
+         if(g_baskets[j].basketId == preservedBaskets[i].basketId)
+           {
+            alreadyLoaded = true;
+            break;
+           }
+        }
+
+      if(!alreadyLoaded && loaded < SK_MAX_BASKETS)
+        {
+         g_baskets[loaded] = preservedBaskets[i];
+         loaded++;
+        }
+     }
+
+   //--- Clear unused slots beyond merged count
+   for(int i = loaded; i < g_basketCount; i++)
+     {
+      g_baskets[i].isValid = false;
+      g_baskets[i].basketId = 0;
      }
 
    //--- Update basket count
@@ -617,12 +659,12 @@ int SSoT_CreateBasket(const ulong ticket, const double openPrice,
    g_virtualTrail[slot].peakTime = TimeCurrent();
    g_virtualTrail[slot].lastCheck = TimeCurrent();
 
-   //--- Write-through to SSoT (atomic group)
-   SSoT_WriteBasketToGlobals(slot);
-
-   //--- Update basket count
+   //--- Update basket count FIRST (so WriteBasketToGlobals boundary check passes)
    g_basketCount++;
    g_cacheValid = true;
+
+   //--- Write-through to SSoT (atomic group)
+   SSoT_WriteBasketToGlobals(slot);
 
    Print("[SSoT] Basket created: ID=", basketId,
          " Ticket=", ticket,
@@ -831,6 +873,7 @@ void SSoT_SaveTrailingCheckpoint(const int basketIndex)
 
 /**
  * Load trailing checkpoint into a specific basket cache entry
+ * Loads basic fields only — Trailing module loads v2.0 fields separately
  * @param basketId     Basket ID (1-based)
  * @param cacheIndex   Cache array index (0-based)
  */

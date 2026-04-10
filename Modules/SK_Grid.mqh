@@ -10,6 +10,7 @@
 #include "SK_DataTypes.mqh"
 #include "SK_GVSchema.mqh"
 #include "SK_SSoT.mqh"
+#include "SK_Safety.mqh"
 
 //+==================================================================+
 //| DVASS GRID SPACING ENGINE — Configurable Multi-Mode Architecture   |
@@ -32,9 +33,9 @@ double  g_gridCachedAdjustedBase = 250;   // Cached adjusted base step
 int     g_gridAtrHandle14 = INVALID_HANDLE;
 int     g_gridAtrHandle5 = INVALID_HANDLE;
 
-//--- ATR buffers for cold-path reads
-double  g_gridBufATR14[1];
-double  g_gridBufATR5[1];
+//--- ATR buffers for cold-path reads (dynamic for ArraySetAsSeries)
+double  g_gridBufATR14[];
+double  g_gridBufATR5[];
 
 //+------------------------------------------------------------------+
 //| PUBLIC API — Initialization                                        |
@@ -257,12 +258,6 @@ double Grid_CalculateDVASS(const int level)
    step = MathMax(step, Inp_DVASS_MinStep);
    step = MathMin(step, Inp_DVASS_MaxStep);
 
-   //--- Log if at bounds
-   if(step <= Inp_DVASS_MinStep + 0.01)
-      Print("[Grid] Note: DVASS spacing at minimum (", Inp_DVASS_MinStep, " pts)");
-   else if(step >= Inp_DVASS_MaxStep - 0.01)
-      Print("[Grid] WARNING: DVASS spacing at maximum (", Inp_DVASS_MaxStep, " pts)");
-
    return step;
 }
 
@@ -374,6 +369,10 @@ void CheckGridLevels(const double bid, const double ask)
       if(g_baskets[i].levelCount >= SK_MAX_LEVELS)
          continue;
 
+      //--- Check per-basket recovery heat limit (Phase 6 safety)
+      if(!Safety_EnforceRecoveryHeatLimit(i))
+         continue;  // This basket is recovery-halted
+
       //--- Check if this basket qualifies for a new level
       if(Grid_ShouldAddLevel(i, bid, ask))
         {
@@ -472,12 +471,6 @@ void Grid_AddLevel(const int basketIndex, const double bid, const double ask)
      {
       //--- Update cooldown
       g_lastGridAddTime = TimeCurrent();
-
-      Print("[Grid] Level queued: Basket=", g_baskets[basketIndex].basketId,
-            " Level=", newLevel,
-            " Lots=", newLot,
-            " Price=", DoubleToString(entryPrice, 5),
-            " Multiplier=", DoubleToString(multiplier, 3));
      }
 }
 

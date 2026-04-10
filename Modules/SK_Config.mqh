@@ -232,6 +232,10 @@ input double     Inp_Bayesian_Decay    = 0.95;            // Level decay
 input double     Inp_Bayesian_MinMult  = 1.1;             // Minimum multiplier
 input double     Inp_Bayesian_MaxMult  = 2.5;             // Maximum multiplier
 
+input string     Inp_Separator7b       = "--- HYBRID LOT ---";
+input double     Inp_Hybrid_KellyWeight = 0.5;            // Kelly influence (0-1)
+input int        Inp_Hybrid_MinTrades  = 50;              // Min trades before Kelly
+
 input string     Inp_Separator8        = "--- PROFIT TARGET ---";
 input double     Inp_ProfitTargetUSD   = 5.0;             // Target profit USD
 input int        Inp_MinBasketAge      = 60;              // Minimum basket age (sec)
