@@ -582,9 +582,10 @@ double Grid_GetNextLevelPrice(const int basketIndex)
    double spacing = GetGridDistance(basketIndex, nextLevel);
 
    //--- Convert points to price distance for XAUUSD
-   //--- 1 point = 0.01 for XAUUSD (5-digit broker)
-   double pointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double priceDist = spacing * pointValue;
+   //--- CRITICAL FIX: Use tickSize (0.01) not SYMBOL_POINT (0.00001)
+   //--- 1 EA "point" = 0.01 price units for XAUUSD
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double priceDist = spacing * tickSize;
 
    if(direction == 0)  // BUY — next level below
       return lastPrice - priceDist;

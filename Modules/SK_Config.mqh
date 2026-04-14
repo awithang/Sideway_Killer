@@ -136,8 +136,8 @@ const double DEF_HEAT_WARNING          = 0.70;      // 70%
 const double DEF_HEAT_CRITICAL         = 0.90;      // 90%
 const double DEF_HEAT_REDUCTION        = 0.80;      // 20% reduction
 const double DEF_HEAT_MIN_MULTIPLIER   = 1.1;
-const double DEF_MAX_RECOVERY_HEAT     = 40.0;      // % of account (FIXED: 5% was too aggressive)
-const double DEF_MAX_TOTAL_HEAT        = 50.0;      // % of account (FIXED: 10% was too aggressive)
+const double DEF_MAX_RECOVERY_HEAT     = 10.0;      // % of account (reasonable for recovery)
+const double DEF_MAX_TOTAL_HEAT        = 15.0;      // % of account (reasonable for recovery)
 const int    DEF_MAX_CONCURRENT_BASKETS = 3;
 
 //--- Fast-Strike
