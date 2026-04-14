@@ -384,6 +384,53 @@ void SSoT_RefreshCacheFromGlobals()
    //--- Update dashboard
    SSoT_UpdateDashboard();
 
+   //--- CRITICAL: Emergency Adoption Re-Link
+   //--- If basketCount == 0 but positions exist, force immediate rebuild
+   if(g_basketCount == 0)
+     {
+      //--- Check if ANY physical positions exist for our EA
+      bool hasPositions = false;
+      ulong foundTicket = 0;
+
+      if(PositionSelectByTicket(0))
+        {
+         //--- Iterate through all positions
+         int total = PositionsTotal();
+         for(int i = 0; i < total; i++)
+           {
+            if(PositionSelectByIndex(PositionGetInteger(POSITION_TICKET)))
+              {
+               ulong ticket = PositionGetInteger(POSITION_TICKET);
+               ulong magic = PositionGetInteger(POSITION_MAGIC);
+
+               //--- Check if this is our EA's position
+               if(magic == Inp_EAMagic || magic == Inp_GridMagic)
+                 {
+                  hasPositions = true;
+                  foundTicket = ticket;
+                  break;
+                 }
+              }
+           }
+        }
+
+      if(hasPositions)
+        {
+         Print("[SSoT] EMERGENCY: No baskets in cache but physical positions exist!",
+               " Found ticket: ", foundTicket, " - forcing orphan scan to rebuild baskets");
+
+         //--- Force immediate orphan scan to rebuild baskets
+         Adoption_ScanOrphansOnStartup();
+
+         //--- If orphan scan found positions, update count
+         if(g_basketCount > 0)
+           {
+            Print("[SSoT] EMERGENCY RECOVERY: Rebuilt ", g_basketCount, " basket(s) from orphaned positions");
+            g_cacheValid = true;
+           }
+        }
+     }
+
    //--- Load trade stats
    SSoT_LoadTradeStats();
 }
@@ -789,6 +836,21 @@ void SSoT_CloseBasket(const int basketIndex)
 
    ulong id = g_baskets[basketIndex].basketId;
 
+   //--- CRITICAL: Check if physical positions still exist before deleting basket
+   //--- This prevents orphaned trades from running without EA supervision
+   if(SSoT_HasOpenPositions(g_baskets[basketIndex]))
+     {
+      Print("[SSoT] CRITICAL ERROR: Attempted to close basket ", id,
+            " but physical positions still exist! ABORTING deletion to prevent orphaned trades.");
+
+      //--- Force status back to ACTIVE to ensure EA continues managing these positions
+      g_baskets[basketIndex].status = BASKET_ACTIVE;
+      string statusGV = GV_Name(id, GV_BASKET_STATUS);
+      GlobalVariableSet(statusGV, (double)BASKET_ACTIVE);
+
+      return;  // Do NOT delete basket if positions still exist
+     }
+
    //--- Update status
    g_baskets[basketIndex].status = BASKET_CLOSED;
    g_baskets[basketIndex].lastSync = TimeCurrent();
@@ -1064,10 +1126,8 @@ bool SSoT_ReadBasketFromGlobals(const ulong basketId, BasketCache &outBasket)
       // Try to infer direction from price context
       outBasket.direction = 0;  // Default to BUY
      }
-   if(outBasket.status >= BASKET_CLOSED)
-      return false;  // Only reject if truly closed
 
-   //--- Read level data
+   //--- Read level data (needed before position check)
    for(int i = 0; i < outBasket.levelCount && i < SK_MAX_LEVELS; i++)
      {
       outBasket.levels[i].ticket =
@@ -1096,10 +1156,53 @@ bool SSoT_ReadBasketFromGlobals(const ulong basketId, BasketCache &outBasket)
    if(outBasket.levels[0].ticket == 0 && outBasket.originalTicket > 0)
       outBasket.levels[0].ticket = outBasket.originalTicket;
 
+   //--- CRITICAL: Check for CLOSED basket with open positions (orphaned trades)
+   if(outBasket.status >= BASKET_CLOSED)
+     {
+      if(SSoT_HasOpenPositions(outBasket))
+        {
+         //--- EMERGENCY: Physical positions exist but basket marked CLOSED
+         //--- Force basket back to ACTIVE to prevent orphaned trades
+         Print("[SSoT] EMERGENCY: Basket ", basketId, " marked CLOSED but positions still open!",
+               " Forcing ACTIVE status. Ticket: ", outBasket.levels[0].ticket);
+         outBasket.status = BASKET_ACTIVE;
+        }
+      else
+        {
+         //--- Truly closed, skip loading
+         Print("[SSoT] Skipping CLOSED basket ", basketId, " - no physical positions found");
+         return false;
+        }
+     }
+
    outBasket.lastSync = TimeCurrent();
    outBasket.isValid = true;
 
    return true;
+}
+
+/**
+ * CRITICAL: Check if ANY physical position exists for basket tickets
+ * Prevents orphaned trades by verifying broker still holds positions
+ * @param basket  Basket to check
+ * @return true if at least one physical position is still open
+ */
+bool SSoT_HasOpenPositions(const BasketCache &basket)
+{
+   for(int i = 0; i < basket.levelCount && i < SK_MAX_LEVELS; i++)
+     {
+      ulong ticket = basket.levels[i].ticket;
+      if(ticket == 0)
+         continue;
+
+      //--- Check if position exists at broker
+      if(PositionSelectByTicket(ticket))
+        {
+         //--- Position is still open
+         return true;
+        }
+     }
+   return false;
 }
 
 //+------------------------------------------------------------------+
