@@ -173,14 +173,18 @@ double Trailing_CalculateMinimumStop(const int basketIndex,
    if(totalVol <= 0)
       return 0;
 
-   //--- Convert USD profit to price points
-   //--- Formula: profit = distance × volume × $100/lot/point
-   //--- distance = profit / (volume × 100)
-   double priceBuffer = profitAtHandover / (totalVol * 100.0);
+   //--- CRITICAL FIX: Use tickSize for price conversion (NOT SYMBOL_POINT)
+   //--- Formula: profit = distance × volume × valuePerPoint
+   //--- distance = profit / (volume × valuePerPoint)
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double valuePerPoint = (tickSize > 0) ? tickValue / tickSize : 100.0;
 
-   //--- Add cost buffer for safety (2 points)
-   double pointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double costBuffer = 2.0 * pointValue;  // 2 points in price
+   //--- Convert USD profit to price distance using valuePerPoint
+   double priceBuffer = profitAtHandover / (totalVol * valuePerPoint);
+
+   //--- Add cost buffer for safety (2 ticks, not points)
+   double costBuffer = 2.0 * tickSize;  // CRITICAL FIX: Use tickSize, not SYMBOL_POINT
 
    double minStop;
    if(g_baskets[basketIndex].direction == 0)  // BUY
@@ -199,10 +203,10 @@ double Trailing_CalculateMinimumStop(const int basketIndex,
  * Check if a basket qualifies for handover from FastStrike to Trailing
  * Called from FastStrikeCheck() — Hot Path
  * @param basketIndex  Basket cache index
- * @param layer2Profit Layer 2 conservative profit estimate (USD)
+ * @param apiProfit    Live API profit (PositionGetDouble sum) — PRIMARY
  * @return true if handover should be executed
  */
-bool Trailing_ShouldHandover(const int basketIndex, const double layer2Profit)
+bool Trailing_ShouldHandover(const int basketIndex, const double apiProfit)
 {
    if(basketIndex < 0 || basketIndex >= g_basketCount)
       return false;
@@ -215,9 +219,9 @@ bool Trailing_ShouldHandover(const int basketIndex, const double layer2Profit)
    if(g_trailIsHandedOver[basketIndex])
       return false;
 
-   //--- Profit must meet target × 0.95
+   //--- API-FIRST: Profit must meet target × 0.95
    double target = g_baskets[basketIndex].targetProfit;
-   if(layer2Profit < target * 0.95)
+   if(apiProfit < target * 0.95)
       return false;
 
    //--- Minimum handover age gate (120 seconds)
@@ -265,17 +269,17 @@ void Trailing_HandOverToTrailing(const int basketIndex,
    g_trailCurrentDist[basketIndex] = Trailing_CalculateTrailDistance();
 
    //--- 4. Calculate initial stop level
+   //--- CRITICAL FIX: Use tickSize (0.01 for XAUUSD) NOT SYMBOL_POINT (0.00001)
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
    if(g_baskets[basketIndex].direction == 0)  // BUY
      {
       g_virtualTrail[basketIndex].stopLevel =
-         currentPrice - (g_trailCurrentDist[basketIndex] *
-                         SymbolInfoDouble(_Symbol, SYMBOL_POINT));
+         currentPrice - (g_trailCurrentDist[basketIndex] * tickSize);
      }
    else  // SELL
      {
       g_virtualTrail[basketIndex].stopLevel =
-         currentPrice + (g_trailCurrentDist[basketIndex] *
-                         SymbolInfoDouble(_Symbol, SYMBOL_POINT));
+         currentPrice + (g_trailCurrentDist[basketIndex] * tickSize);
      }
 
    //--- 5. Lock minimum stop level (profit floor)
@@ -368,8 +372,9 @@ void Trailing_UpdateVirtualTrailing(const int basketIndex,
       g_virtualTrail[basketIndex].peakTime = TimeCurrent();
 
    //--- STEP 3: Calculate new virtual stop
-   double pointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double trailDistancePrice = trailDist * pointValue;
+   //--- CRITICAL FIX: Use tickSize (0.01 for XAUUSD) NOT SYMBOL_POINT (0.00001)
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double trailDistancePrice = trailDist * tickSize;
 
    double newStop;
    if(g_baskets[basketIndex].direction == 0)  // BUY
@@ -399,20 +404,115 @@ void Trailing_UpdateVirtualTrailing(const int basketIndex,
    if(triggered)
      {
       Print("[Trailing] TRIGGERED: Basket ", g_baskets[basketIndex].basketId,
-            " closed at ", DoubleToString(currentPrice, 5),
+            " at ", DoubleToString(currentPrice, 5),
             " (stop: ", DoubleToString(g_virtualTrail[basketIndex].stopLevel, 5),
-            ") — Peak was: ", DoubleToString(g_virtualTrail[basketIndex].peakPrice, 5),
-            " | Profit at handover: $", DoubleToString(g_trailProfitAtHandover[basketIndex], 2));
+            ") — Peak was: ", DoubleToString(g_virtualTrail[basketIndex].peakPrice, 5));
 
-      //--- Close the basket
-      SSoT_CloseBasket(basketIndex);
+      //--- CRITICAL FIX: ACTUALLY close positions at broker BEFORE marking SSoT closed
+      ulong basketId = g_baskets[basketIndex].basketId;
+      int levels = g_baskets[basketIndex].levelCount;
+      int closedCount = 0;
+      int failedCount = 0;
 
-      //--- Reset trailing state
-      g_trailIsHandedOver[basketIndex] = false;
-      g_trailProfitAtHandover[basketIndex] = 0;
-      g_trailCurrentDist[basketIndex] = 50.0;
-      g_trailMinimumStop[basketIndex] = 0;
+      for(int j = levels - 1; j >= 0; j--)
+        {
+         ulong ticket = g_baskets[basketIndex].levels[j].ticket;
+         if(ticket > 0)
+           {
+            if(Trailing_ClosePosition(ticket))
+               closedCount++;
+            else
+               failedCount++;
+           }
+        }
+
+      Print("[Trailing] Basket ", basketId, " close result: ",
+            closedCount, " closed, ", failedCount, " failed");
+
+      //--- Only mark SSoT closed if ALL positions were closed
+      if(failedCount == 0)
+        {
+         SSoT_CloseBasket(basketIndex);
+
+         //--- Reset trailing state
+         g_trailIsHandedOver[basketIndex] = false;
+         g_trailProfitAtHandover[basketIndex] = 0;
+         g_trailCurrentDist[basketIndex] = 50.0;
+         g_trailMinimumStop[basketIndex] = 0;
+        }
+      else
+        {
+         Print("[Trailing] WARNING: ", failedCount, " positions failed to close. Basket NOT marked closed.");
+        }
      }
+}
+
+/**
+ * Close a single position at the broker
+ * @param ticket  Position ticket
+ * @return true if closed successfully
+ */
+bool Trailing_ClosePosition(const ulong ticket)
+{
+   if(!PositionSelectByTicket(ticket))
+     {
+      Print("[Trailing] Position ", ticket, " no longer exists — already closed");
+      return true;  // Already gone = success
+     }
+
+   double volume = PositionGetDouble(POSITION_VOLUME);
+   long type = PositionGetInteger(POSITION_TYPE);
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   double price;
+
+   if(type == POSITION_TYPE_BUY)
+      price = SymbolInfoDouble(symbol, SYMBOL_BID);
+   else
+      price = SymbolInfoDouble(symbol, SYMBOL_ASK);
+
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.position = ticket;
+   request.symbol = symbol;
+   request.volume = volume;
+   request.type = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+   request.price = price;
+   request.deviation = 50;
+   request.magic = 0;
+   request.type_filling = Trailing_GetFillingMode();
+
+   if(!OrderSend(request, result))
+     {
+      Print("[Trailing] ERROR: Failed to close position ", ticket,
+            " | Error: ", GetLastError(), " Retcode: ", result.retcode);
+      return false;
+     }
+
+   if(result.retcode != TRADE_RETCODE_DONE &&
+      result.retcode != TRADE_RETCODE_DONE_PARTIAL)
+     {
+      Print("[Trailing] WARNING: Close retcode=", result.retcode,
+            " for position ", ticket);
+      return false;
+     }
+
+   Print("[Trailing] Position ", ticket, " closed at ", DoubleToString(price, 5));
+   return true;
+}
+
+/**
+ * Auto-detect broker filling mode for close orders
+ */
+ENUM_ORDER_TYPE_FILLING Trailing_GetFillingMode()
+{
+   long fillingMask = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((fillingMask & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      return ORDER_FILLING_FOK;
+   if((fillingMask & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      return ORDER_FILLING_IOC;
+   return ORDER_FILLING_FOK;
 }
 
 /**
@@ -876,23 +976,26 @@ bool IsConnectionStable()
 }
 
 //+------------------------------------------------------------------+
-//| INTEGRATION: Update FastStrike to include handover logic           |
-//| This function WRAPS FastStrikeCheck to add the handover gate       |
+//| INTEGRATION: FastStrike with Immediate Close Protocol              |
+//| This function replaces FastStrikeCheck with immediate close logic  |
 //| Called from OnTick() as the primary profit check entry point       |
+//| CRITICAL: Closes immediately when Broker Net Profit >= Target      |
 //+------------------------------------------------------------------+
 
 /**
- * Fast-Strike with handover integration
+ * Fast-Strike with Immediate Close Protocol
  * This replaces the standalone FastStrikeCheck() from Phase 4
  *
- * Flow:
- * 1. Layer 1 + Layer 2 checks (unchanged)
- * 2. If profit hit:
- *    a. Age >= 120s → HandOverToTrailing()
- *    b. Age < 120s → Close immediately (FastStrike original)
+ * API-FIRST Flow:
+ * 1. Layer 1 + Layer 2 checks (unchanged — advisory only)
+ * 2. If Broker Net Profit >= Target:
+ *    → CLOSE IMMEDIATELY — NO handover, NO 120s age gate delay
  * 3. If already handed over → skip (trailing manages it)
  *
- * @return true if a basket was closed or handed over
+ * CRITICAL: Uses Broker's POSITION_PROFIT directly (no math calculations).
+ * When target is hit, OrderClose executes WITHOUT waiting for Trailing Stop.
+ *
+ * @return true if a basket was closed
  */
 bool FastStrikeCheckWithHandover()
 {
@@ -926,61 +1029,37 @@ bool FastStrikeCheckWithHandover()
 
       double target = g_baskets[i].targetProfit;
 
-      //--- LAYER 1: Aggressive check
+      //=== API-FIRST: Live API profit is the PRIMARY decision source ===
+      double apiProfit = GetBasketApiProfit(i);
+
+      //--- LAYER 1: Aggressive math check (advisory — does NOT block)
       double layer1 = FastStrike_CalcLayer1(i, bid, ask);
       if(layer1 < target)
          continue;
 
-      //--- LAYER 2: Conservative check
+      //--- LAYER 2: Conservative math check (advisory — does NOT block)
       if(Inp_FastStrikeMode != FAST_LAYER1)
         {
          double layer2 = FastStrike_CalcLayer2(i, bid, ask);
          if(layer2 < target * g_fsConservativeFactor)
-            continue;
+            continue;  // Advisory layer — skip to next basket
 
-         //--- LAYER 3: API verification (optional)
-         if(Inp_FastStrikeMode == FAST_THREE_LAYER)
-           {
-            double layer3 = FastStrike_CalcLayer3(i);
-            if(layer3 < target * g_fsConservativeFactor)
-               continue;
-           }
-
-         //--- PRE-EXECUTION: Verify profit still positive
+         //--- PRE-EXECUTION: Spread spike check only (API-FIRST — no math gate)
          if(!FastStrike_PreExecutionVerify(i, bid, ask, target))
             continue;
 
-         //--- HANDOVER DECISION POINT
-         if(Trailing_ShouldHandover(i, layer2))
-           {
-            //--- Age >= 120s → Hand over to trailing
-            Trailing_HandOverToTrailing(i, layer2, bid, ask);
-            g_fsTotalChecks++;
-            return true;  // Return early
-           }
-         else
-           {
-            //--- Age < 120s → Close immediately
-            FastStrike_CloseBasketImmediate(i);
-            g_fsTotalCloses++;
-            return true;  // Return early
-           }
+         //--- CRITICAL: CLOSE IMMEDIATELY when API profit >= target
+         // NO handover delay, NO 120s age gate — execute OrderClose without delay
+         FastStrike_CloseBasketImmediate(i);
+         g_fsTotalCloses++;
+         return true;
         }
       else
         {
-         //--- Layer 1 only mode (aggressive)
-         if(Trailing_ShouldHandover(i, layer1))
-           {
-            Trailing_HandOverToTrailing(i, layer1, bid, ask);
-            g_fsTotalChecks++;
-            return true;
-           }
-         else
-           {
-            FastStrike_CloseBasketImmediate(i);
-            g_fsTotalCloses++;
-            return true;
-           }
+         //--- Layer 1 only mode (aggressive) — same immediate close behavior
+         FastStrike_CloseBasketImmediate(i);
+         g_fsTotalCloses++;
+         return true;
         }
      }
 

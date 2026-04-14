@@ -60,6 +60,117 @@ struct CommandTracking
 CommandTracking  g_commands[256];
 int              g_commandCount = 0;
 
+//--- CRITICAL FIX: Persistent adopted tickets list
+//--- This survives cache refresh cycles and prevents re-adoption loops
+ulong            g_adoptedTickets[SK_MAX_BASKETS * SK_MAX_LEVELS];
+int              g_adoptedTicketCount = 0;
+
+/**
+ * Add a ticket to the persistent adopted tickets list
+ * Called when a position is first adopted into a basket
+ * CRITICAL FIX: Now persists to GVs to survive EA restarts
+ */
+void Adoption_MarkTicketAdopted(const ulong ticket)
+{
+   for(int i = 0; i < g_adoptedTicketCount; i++)
+     {
+      if(g_adoptedTickets[i] == ticket)
+         return;  // Already tracked
+     }
+   if(g_adoptedTicketCount < SK_MAX_BASKETS * SK_MAX_LEVELS)
+     {
+      g_adoptedTickets[g_adoptedTicketCount] = ticket;
+      g_adoptedTicketCount++;
+
+      //--- CRITICAL FIX: Persist to GV for restart survival
+      GlobalVariableSet("SK_ADOPT_" + IntegerToString(ticket), 1.0);
+     }
+}
+
+/**
+ * Check if a ticket has been adopted (persistent across cache refresh)
+ * CRITICAL FIX: Also checks GVs for restart-persistent tracking
+ */
+bool Adoption_IsTicketAdopted(const ulong ticket)
+{
+   //--- Check in-memory array (fast path)
+   for(int i = 0; i < g_adoptedTicketCount; i++)
+     {
+      if(g_adoptedTickets[i] == ticket)
+         return true;
+     }
+
+   //--- CRITICAL FIX: Also check GV for persistent tracking across restarts
+   string gvName = "SK_ADOPT_" + IntegerToString(ticket);
+   if(GlobalVariableCheck(gvName))
+     {
+      double val = GlobalVariableGet(gvName);
+      if(val > 0)
+        return true;
+     }
+
+   return false;
+}
+
+/**
+ * Remove a ticket from the adopted list (after basket is closed)
+ * CRITICAL FIX: Also removes from GV persistence
+ */
+void Adoption_RemoveAdoptedTicket(const ulong ticket)
+{
+   for(int i = 0; i < g_adoptedTicketCount; i++)
+     {
+      if(g_adoptedTickets[i] == ticket)
+        {
+         for(int j = i; j < g_adoptedTicketCount - 1; j++)
+            g_adoptedTickets[j] = g_adoptedTickets[j + 1];
+         g_adoptedTickets[g_adoptedTicketCount - 1] = 0;
+         g_adoptedTicketCount--;
+
+         //--- CRITICAL FIX: Also remove from GV persistence
+         GlobalVariableSet("SK_ADOPT_" + IntegerToString(ticket), 0.0);
+         GlobalVariableDel("SK_ADOPT_" + IntegerToString(ticket));  // Clean up GV
+         return;
+        }
+     }
+}
+
+/**
+ * Load adopted tickets from GV persistence at startup
+ * Called BEFORE deduplication to prevent adoption loop
+ */
+void Adoption_LoadFromGVs()
+{
+   g_adoptedTicketCount = 0;
+
+   //--- Scan all GVs for adopted ticket markers
+   int totalGVs = GlobalVariablesTotal();
+   for(int i = 0; i < totalGVs; i++)
+     {
+      string name = GlobalVariableName(i);
+
+      //--- Check if this is an adoption marker GV
+      if(StringFind(name, "SK_ADOPT_") == 0)
+        {
+         double val = GlobalVariableGet(name);
+         if(val > 0)
+           {
+            //--- Extract ticket from GV name: "SK_ADOPT_12345"
+            string ticketStr = StringSubstr(name, 10);  // Skip "SK_ADOPT_"
+            ulong ticket = (ulong)StringToInteger(ticketStr);
+
+            if(ticket > 0 && g_adoptedTicketCount < SK_MAX_BASKETS * SK_MAX_LEVELS)
+              {
+               g_adoptedTickets[g_adoptedTicketCount] = ticket;
+               g_adoptedTicketCount++;
+              }
+           }
+        }
+     }
+
+   Print("[Adoption] Loaded ", g_adoptedTicketCount, " adopted tickets from GV persistence");
+}
+
 //--- Spread history buffer
 double           g_spreadHistory[100];
 int              g_spreadHistoryIndex = 0;
@@ -136,6 +247,64 @@ void Adoption_Deinit()
    g_commandCount = 0;
 
    Print("[Adoption] Deinitialized");
+}
+
+/**
+ * One-time startup scan: find orphan positions not yet in any basket
+ * Called from SSoT_LoadFromGlobals() after loading — recovers existing positions
+ * Ignores normal age/heat checks — aggressive adoption for existing open positions
+ */
+void Adoption_ScanOrphansOnStartup()
+{
+   int total = PositionsTotal();
+   int adopted = 0;
+
+   for(int i = total - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      //--- Skip if symbol doesn't match
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+         continue;
+
+      //--- Skip if already adopted (persistent check)
+      if(Adoption_IsTicketAdopted(ticket))
+         continue;
+
+      //--- Skip if already in a basket (cache check)
+      if(Adoption_IsPositionInBasket(ticket))
+         continue;
+
+      //--- Skip if position is in profit
+      double profit = PositionGetDouble(POSITION_PROFIT);
+      double swap = PositionGetDouble(POSITION_SWAP);
+      double netPnL = profit + swap;
+      if(netPnL >= 0)
+         continue;  // Not in drawdown — skip
+
+      //--- This is an orphan — adopt immediately
+      int direction = (int)PositionGetInteger(POSITION_TYPE);
+      double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double lots = PositionGetDouble(POSITION_VOLUME);
+      ulong magic = PositionGetInteger(POSITION_MAGIC);
+
+      int basketIndex = SSoT_CreateBasket(ticket, openPrice, lots, direction, magic);
+      if(basketIndex >= 0)
+        {
+         Adoption_MarkTicketAdopted(ticket);
+         adopted++;
+         Print("[Adoption] Orphan recovered on startup: Ticket=", ticket,
+               " → Basket ID=", g_baskets[basketIndex].basketId,
+               " | Drawdown: $", DoubleToString(netPnL, 2));
+        }
+     }
+
+   if(adopted > 0)
+      Print("[Adoption] Startup orphan scan complete: ", adopted, " position(s) recovered");
 }
 
 /**
@@ -276,6 +445,9 @@ int Adoption_AdoptPosition(const ulong ticket)
 
    if(basketIndex >= 0)
      {
+      //--- CRITICAL: Mark ticket as adopted to prevent re-adoption loop
+      Adoption_MarkTicketAdopted(ticket);
+
       Print("[Adoption] Position ", ticket, " adopted as Basket ID=",
             g_baskets[basketIndex].basketId,
             " (", (direction == 0 ? "BUY" : "SELL"), " ", lots, " lots @ ",
@@ -351,7 +523,12 @@ bool Adoption_MeetsBaseCriteria(const ulong ticket, AdoptionResult &result)
       return false;
      }
 
-   //--- CRITERION 5: Not already adopted
+   //--- CRITERION 5: Not already adopted (check BOTH cache AND persistent list)
+   if(Adoption_IsTicketAdopted(ticket))
+     {
+      result.reason = "Already adopted (persistent check)";
+      return false;
+     }
    if(Adoption_IsPositionInBasket(ticket))
      {
       result.reason = "Already in basket";

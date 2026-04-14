@@ -374,7 +374,12 @@ double Lot_CalculateCurrentHeatInternal()
 
       //--- Only count drawdown (positive = in loss)
       if(dist > 0)
-         totalDrawdown += dist * g_baskets[i].totalVolume * 100.0;
+        {
+         double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+         double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         double valuePerPoint = (tickSize > 0) ? tickValue / tickSize : 100.0;
+         totalDrawdown += dist * g_baskets[i].totalVolume * valuePerPoint;
+        }
      }
 
    return (totalDrawdown / balance) * 100.0;

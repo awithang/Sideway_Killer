@@ -41,14 +41,22 @@
 int OnInit()
 {
    //--- STEP 1: Initialize SSoT system (Foundation)
+   //--- This includes the one-time GV purge of orphan baskets
    if(!SSoT_Initialize())
      {
       Print("[ERROR] SSoT initialization failed!");
       return INIT_FAILED;
      }
 
+   //--- STEP 1b: Purge orphan GVs (status = 2.0) from past sessions
+   SSoT_PurgeOrphanGVs();
+
    //--- STEP 2: Load existing basket state from Global Variables
    //--- This MUST complete BEFORE Dashboard_Init() so cache is populated
+   //--- This function also:
+   //---   a) Deduplicates adoption loop debris (same ticket in multiple baskets)
+   //---   b) Populates persistent adoption map from loaded tickets
+   //---   c) Scans for orphan positions and adopts them immediately
    SSoT_LoadFromGlobals();
 
    //--- STEP 3: Load trailing checkpoints for handed-over baskets

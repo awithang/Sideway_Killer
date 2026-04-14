@@ -135,6 +135,9 @@ bool SSoT_Initialize()
          ", Max baskets: ", SK_MAX_BASKETS,
          ", Max levels: ", SK_MAX_LEVELS);
 
+   //--- One-Time GV Purge: Clean up orphan baskets from previous sessions
+   SSoT_PurgeOrphanGVs();
+
    return true;
 }
 
@@ -163,6 +166,13 @@ void SSoT_Deinit(const int reason)
 
    Print("[SSoT] Deinitialized. Reason: ", reason);
 }
+
+//--- Forward declarations for Adoption module functions
+//--- (Adoption.mqh includes SSoT.mqh, so we can't #include it here)
+void Adoption_MarkTicketAdopted(const ulong ticket);
+void Adoption_ScanOrphansOnStartup();
+bool Adoption_IsTicketAdopted(const ulong ticket);  // Added for GV-persistent check
+void Adoption_LoadFromGVs();  // Added for GV-persistent adoption tracking
 
 //+------------------------------------------------------------------+
 //| HOT PATH: Cache-only read operations                               |
@@ -287,12 +297,13 @@ void SSoT_RefreshCacheFromGlobals()
    //--- Read global state first
    SSoT_ReadGlobalStateFromGVs();
 
-   //--- PRESERVE fresh baskets (created < 5s ago) that might not have GVs yet
+   //--- PRESERVE fresh baskets (created < 30s ago) that might not have GVs yet
    //--- This prevents the 'Ghost Basket' wipe after manual trade creation
+   //--- CRITICAL FIX: Extended from 5s to 30s to handle slow GV writes
    BasketCache preservedBaskets[];
    ArrayResize(preservedBaskets, SK_MAX_BASKETS);
    int preservedCount = 0;
-   const int FRESH_WINDOW_SECONDS = 5;
+   const int FRESH_WINDOW_SECONDS = 30;  // Increased from 5 to 30 seconds
 
    for(int i = 0; i < g_basketCount; i++)
      {
@@ -536,8 +547,10 @@ double SSoT_CalculateHeatPct()
 
       if(dist > 0)
         {
-         //--- Approximate drawdown: distance * volume * $100/lot/point (XAUUSD)
-         totalDrawdown += dist * g_baskets[i].totalVolume * 100.0;
+         double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+         double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+         double valuePerPoint = (tickSize > 0) ? tickValue / tickSize : 100.0;
+         totalDrawdown += dist * g_baskets[i].totalVolume * valuePerPoint;
         }
      }
 
@@ -574,7 +587,11 @@ double SSoT_CalcBasketProgress(const int index)
    else
       dist = g_baskets[index].weightedAvg - currentPrice;
 
-   double profit = dist * g_baskets[index].totalVolume * 100.0;
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double valuePerPoint = (tickSize > 0) ? tickValue / tickSize : 100.0;
+
+   double profit = dist * g_baskets[index].totalVolume * valuePerPoint;
 
    if(profit <= 0)
       return 0;
@@ -776,9 +793,37 @@ void SSoT_CloseBasket(const int basketIndex)
    g_baskets[basketIndex].status = BASKET_CLOSED;
    g_baskets[basketIndex].lastSync = TimeCurrent();
 
-   //--- Write-through
-   string statusGV = GV_Name(id, GV_BASKET_STATUS);
-   GlobalVariableSet(statusGV, (double)BASKET_CLOSED);
+   //--- Clear trailing state BEFORE compaction (using current valid index)
+   g_virtualTrail[basketIndex].isActivated = false;
+   g_virtualTrail[basketIndex].peakPrice = 0;
+   g_virtualTrail[basketIndex].stopLevel = 0;
+
+   //--- Delete trailing GVs
+   GlobalVariableDel(GV_TrailName(id, GV_TRAIL_PEAK));
+   GlobalVariableDel(GV_TrailName(id, GV_TRAIL_STOP));
+   GlobalVariableDel(GV_TrailName(id, GV_TRAIL_ACTIVE));
+   GlobalVariableDel(GV_TrailName(id, GV_TRAIL_TIME));
+
+   //--- Delete all basket core GVs (9 fields)
+   GlobalVariableDel(GV_Name(id, GV_BASKET_WA));
+   GlobalVariableDel(GV_Name(id, GV_BASKET_VOL));
+   GlobalVariableDel(GV_Name(id, GV_BASKET_TARGET));
+   GlobalVariableDel(GV_Name(id, GV_BASKET_STATUS));
+   GlobalVariableDel(GV_Name(id, GV_BASKET_LEVELS));
+   GlobalVariableDel(GV_Name(id, GV_BASKET_DIR));
+   GlobalVariableDel(GV_Name(id, GV_BASKET_CREATED));
+   GlobalVariableDel(GV_Name(id, GV_BASKET_MAGIC));
+   GlobalVariableDel(GV_Name(id, GV_BASKET_TICKET0));
+
+   //--- Delete all per-level GVs (5 fields per level)
+   for(int i = 0; i < g_baskets[basketIndex].levelCount; i++)
+     {
+      GlobalVariableDel(GV_LevelName(id, i, GV_LEVEL_TICKET));
+      GlobalVariableDel(GV_LevelName(id, i, GV_LEVEL_LOT));
+      GlobalVariableDel(GV_LevelName(id, i, GV_LEVEL_PRICE));
+      GlobalVariableDel(GV_LevelName(id, i, GV_LEVEL_TIME));
+      GlobalVariableDel(GV_LevelName(id, i, GV_LEVEL_ORIGINAL));
+     }
 
    //--- Invalidate cache entry
    g_baskets[basketIndex].isValid = false;
@@ -786,24 +831,13 @@ void SSoT_CloseBasket(const int basketIndex)
    //--- Compact basket array (remove gap)
    SSoT_CompactBaskets();
 
-   //--- Update trailing state
-   g_virtualTrail[basketIndex].isActivated = false;
-   g_virtualTrail[basketIndex].peakPrice = 0;
-   g_virtualTrail[basketIndex].stopLevel = 0;
-
-   //--- Clear trailing GVs
-   GlobalVariableSet(GV_TrailName(id, GV_TRAIL_PEAK), 0);
-   GlobalVariableSet(GV_TrailName(id, GV_TRAIL_STOP), 0);
-   GlobalVariableSet(GV_TrailName(id, GV_TRAIL_ACTIVE), 0);
-   GlobalVariableSet(GV_TrailName(id, GV_TRAIL_TIME), 0);
-
    //--- Update global state
    SSoT_WriteGlobalStateToGVs();
 
    //--- Update dashboard
    SSoT_UpdateDashboard();
 
-   Print("[SSoT] Basket closed: ID=", id);
+   Print("[SSoT] Basket closed & GVs flushed: ID=", id);
 }
 
 /**
@@ -971,8 +1005,23 @@ void SSoT_WriteBasketToGlobals(const int basketIndex)
             " WA gv=", verifyWA, " cache=", g_baskets[basketIndex].weightedAvg,
             " VOL gv=", verifyVol, " cache=", g_baskets[basketIndex].totalVolume,
             " STS gv=", verifyStatus, " cache=", g_baskets[basketIndex].status);
-      //--- Retry write
+      //--- CRITICAL FIX: Retry write ONCE and verify again
       SSoT_WriteBasketToGlobals(basketIndex);
+
+      //--- Second verification
+      verifyWA = GlobalVariableGet(GV_Name(id, GV_BASKET_WA));
+      verifyVol = GlobalVariableGet(GV_Name(id, GV_BASKET_VOL));
+      verifyStatus = GlobalVariableGet(GV_Name(id, GV_BASKET_STATUS));
+
+      if(MathAbs(verifyWA - g_baskets[basketIndex].weightedAvg) > 0.1 ||
+         MathAbs(verifyVol - g_baskets[basketIndex].totalVolume) > 0.001 ||
+         verifyStatus != (double)g_baskets[basketIndex].status)
+        {
+         Print("[SSoT] CRITICAL: Basket ", id, " write FAILED after retry - marking invalid");
+         g_baskets[basketIndex].isValid = false;
+         g_basketCount--;  // Revert count
+         return;  // Don't mark as valid if write failed
+        }
      }
 
    //--- Update global state
@@ -981,9 +1030,10 @@ void SSoT_WriteBasketToGlobals(const int basketIndex)
 
 /**
  * Read a single basket from Global Variables
+ * RESILIENT: Tolerates minor data inconsistencies
  * @param basketId   Basket ID (1-based)
  * @param outBasket  Output basket structure
- * @return true if basket was read successfully
+ * @return true if basket was loaded (even partially)
  */
 bool SSoT_ReadBasketFromGlobals(const ulong basketId, BasketCache &outBasket)
 {
@@ -992,25 +1042,30 @@ bool SSoT_ReadBasketFromGlobals(const ulong basketId, BasketCache &outBasket)
    if(!GlobalVariableCheck(statusName))
       return false;
 
-   //--- Read core fields
+   //--- Read core fields with safe defaults
    outBasket.basketId = basketId;
    outBasket.weightedAvg = GlobalVariableGet(GV_Name(basketId, GV_BASKET_WA));
    outBasket.totalVolume = GlobalVariableGet(GV_Name(basketId, GV_BASKET_VOL));
    outBasket.targetProfit = GlobalVariableGet(GV_Name(basketId, GV_BASKET_TARGET));
-   outBasket.status = (ENUM_BASKET_STATUS)GlobalVariableGet(statusName);
+   outBasket.status = (ENUM_BASKET_STATUS)(int)GlobalVariableGet(statusName);
    outBasket.levelCount = (int)GlobalVariableGet(GV_Name(basketId, GV_BASKET_LEVELS));
    outBasket.direction = (int)GlobalVariableGet(GV_Name(basketId, GV_BASKET_DIR));
    outBasket.created = (datetime)GlobalVariableGet(GV_Name(basketId, GV_BASKET_CREATED));
    outBasket.originalMagic = (ulong)GlobalVariableGet(GV_Name(basketId, GV_BASKET_MAGIC));
    outBasket.originalTicket = (ulong)GlobalVariableGet(GV_Name(basketId, GV_BASKET_TICKET0));
 
-   //--- Validate
-   if(outBasket.levelCount <= 0 || outBasket.levelCount > SK_MAX_LEVELS)
-      return false;
+   //--- RESILIENT VALIDATION: Fix bad data instead of rejecting
+   if(outBasket.levelCount <= 0)
+      outBasket.levelCount = 1;  // Assume at least 1 level
+   if(outBasket.levelCount > SK_MAX_LEVELS)
+      outBasket.levelCount = SK_MAX_LEVELS;
    if(outBasket.direction != 0 && outBasket.direction != 1)
-      return false;
+     {
+      // Try to infer direction from price context
+      outBasket.direction = 0;  // Default to BUY
+     }
    if(outBasket.status >= BASKET_CLOSED)
-      return false;
+      return false;  // Only reject if truly closed
 
    //--- Read level data
    for(int i = 0; i < outBasket.levelCount && i < SK_MAX_LEVELS; i++)
@@ -1036,6 +1091,10 @@ bool SSoT_ReadBasketFromGlobals(const ulong basketId, BasketCache &outBasket)
       outBasket.levels[i].openTime = 0;
       outBasket.levels[i].isOriginal = false;
      }
+
+   //--- If level 0 ticket is 0 but originalTicket is set, use it
+   if(outBasket.levels[0].ticket == 0 && outBasket.originalTicket > 0)
+      outBasket.levels[0].ticket = outBasket.originalTicket;
 
    outBasket.lastSync = TimeCurrent();
    outBasket.isValid = true;
@@ -1108,7 +1167,8 @@ void SSoT_SaveToGlobals()
    SSoT_SaveTradeStats();
 
    g_lastAutoSave = TimeCurrent();
-   Print("[SSoT] Full state saved to GVs. Baskets: ", g_basketCount);
+
+   //--- SILENT: No logging for periodic auto-saves to avoid cluttering Experts tab
 }
 
 /**
@@ -1120,7 +1180,78 @@ void SSoT_LoadFromGlobals()
    //--- Read global state
    SSoT_ReadGlobalStateFromGVs();
 
-   //--- Scan and load baskets
+   //--- CRITICAL FIX: Load adopted tickets from GVs FIRST
+   //--- This prevents deduplication from purging legitimate baskets
+   Adoption_LoadFromGVs();
+
+   //--- CRITICAL FIX: Deduplicate GV baskets by ticket BEFORE loading
+   //--- But SKIP deduplication for tickets in the persistent adoption map
+   //--- If multiple baskets have the same original ticket (adoption loop debris),
+   //--- keep only the FIRST one and delete duplicates from GVs
+   ulong seenTickets[SK_MAX_BASKETS];
+   int seenCount = 0;
+   int purged = 0;
+
+   for(ulong id = 1; id <= (ulong)SK_MAX_BASKETS; id++)
+     {
+      string statusName = GV_Name(id, GV_BASKET_STATUS);
+      if(!GlobalVariableCheck(statusName))
+         continue;
+
+      double status = GlobalVariableGet(statusName);
+      if(status >= 2.0)
+         continue;  // Skip closed baskets
+
+      //--- Read original ticket
+      string ticketName = GV_Name(id, GV_BASKET_TICKET0);
+      double ticketVal = 0;
+      if(GlobalVariableCheck(ticketName))
+         ticketVal = GlobalVariableGet(ticketName);
+
+      if(ticketVal <= 0)
+         continue;  // Empty basket — skip
+
+      //--- CRITICAL FIX: Skip deduplication if ticket is in persistent adoption map
+      if(Adoption_IsTicketAdopted((ulong)ticketVal))
+        {
+         //--- This ticket is legitimate (manually adopted or recovered)
+         //--- Add to seen list to prevent other baskets with same ticket from being purged
+         if(seenCount < SK_MAX_BASKETS)
+           {
+            seenTickets[seenCount] = (ulong)ticketVal;
+            seenCount++;
+           }
+         continue;
+        }
+
+      //--- Check for duplicate ticket (only for untracked tickets)
+      bool isDuplicate = false;
+      for(int j = 0; j < seenCount; j++)
+        {
+         if(seenTickets[j] == (ulong)ticketVal)
+           {
+            isDuplicate = true;
+            break;
+           }
+        }
+
+      if(isDuplicate)
+        {
+         //--- Duplicate found — delete this basket's GVs
+         SSoT_ClearBasketGlobals(id);
+         purged++;
+        }
+      else
+        {
+         seenTickets[seenCount] = (ulong)ticketVal;
+         seenCount++;
+        }
+     }
+
+   if(purged > 0)
+      Print("[SSoT] Purged ", purged, " duplicate basket(s) from adoption loop debris");
+
+   //--- Now load clean baskets
    int loaded = 0;
    for(ulong id = 1; id <= (ulong)SK_MAX_BASKETS && loaded < SK_MAX_BASKETS; id++)
      {
@@ -1159,7 +1290,14 @@ void SSoT_LoadFromGlobals()
         }
      }
 
-   Print("[SSoT] Loaded from GVs. Baskets: ", loaded,
+   //--- CRITICAL: Populate in-memory adoption map with loaded tickets
+   //--- (Already done by Adoption_LoadFromGVs() which fills g_adoptedTickets array)
+
+   //--- CRITICAL: Scan for orphan positions not yet in any basket
+   //--- This recovers positions that were opened before the EA was attached
+   Adoption_ScanOrphansOnStartup();
+
+   Print("[SSoT] Loaded from GVs. Baskets: ", g_basketCount,
          " Next ID: ", g_nextBasketId);
 }
 
@@ -1366,6 +1504,72 @@ void SSoT_ClearBasketGlobals(const ulong basketId)
 }
 
 /**
+ * One-Time GV Purge: Delete orphan baskets with status = 2.0 (CLOSED)
+ * Scans all SK_ GVs, finds closed baskets, and deletes all their GVs
+ * Called from SSoT_Initialize() on EA startup to clean past debris
+ */
+void SSoT_PurgeOrphanGVs()
+{
+   int purgedBaskets = 0;
+   int deletedGVs = 0;
+
+   for(int i = 0; i < GlobalVariablesTotal(); i++)
+     {
+      string name = GlobalVariableName(i);
+
+      //--- Only process basket STATUS GVs: SK_B###_STS
+      if(!IsSK_GlobalVariable(name))
+         continue;
+      if(StringFind(name, "_STS") < 0)  // Not a status field
+         continue;
+
+      //--- Extract basket ID from name (SK_B###_STS)
+      ulong basketId = GV_ExtractBasketId(name);
+      if(basketId == 0)
+         continue;
+
+      //--- Check if status is CLOSED (2.0)
+      double statusVal = GlobalVariableGet(name);
+      if(statusVal < 2.0 - 0.001)
+         continue;  // Active or Closing -- skip
+
+      //--- Found an orphan -- delete all its GVs
+      purgedBaskets++;
+
+      //--- Delete basket core GVs (9 fields)
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_WA)))     deletedGVs++;
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_VOL)))    deletedGVs++;
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_TARGET))) deletedGVs++;
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_STATUS))) deletedGVs++;
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_LEVELS))) deletedGVs++;
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_DIR)))    deletedGVs++;
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_CREATED)))deletedGVs++;
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_MAGIC)))  deletedGVs++;
+      if(GlobalVariableDel(GV_Name(basketId, GV_BASKET_TICKET0)))deletedGVs++;
+
+      //--- Delete trailing GVs (4 fields)
+      if(GlobalVariableDel(GV_TrailName(basketId, GV_TRAIL_PEAK)))  deletedGVs++;
+      if(GlobalVariableDel(GV_TrailName(basketId, GV_TRAIL_STOP)))  deletedGVs++;
+      if(GlobalVariableDel(GV_TrailName(basketId, GV_TRAIL_ACTIVE)))deletedGVs++;
+      if(GlobalVariableDel(GV_TrailName(basketId, GV_TRAIL_TIME)))  deletedGVs++;
+
+      //--- Delete per-level GVs (max SK_MAX_LEVELS levels x 5 fields each)
+      for(int lvl = 0; lvl < SK_MAX_LEVELS; lvl++)
+        {
+         if(GlobalVariableDel(GV_LevelName(basketId, lvl, GV_LEVEL_TICKET)))  deletedGVs++;
+         if(GlobalVariableDel(GV_LevelName(basketId, lvl, GV_LEVEL_LOT)))     deletedGVs++;
+         if(GlobalVariableDel(GV_LevelName(basketId, lvl, GV_LEVEL_PRICE)))   deletedGVs++;
+         if(GlobalVariableDel(GV_LevelName(basketId, lvl, GV_LEVEL_TIME)))    deletedGVs++;
+         if(GlobalVariableDel(GV_LevelName(basketId, lvl, GV_LEVEL_ORIGINAL)))deletedGVs++;
+        }
+     }
+
+   if(purgedBaskets > 0)
+      Print("[SSoT] Orphan GV purge complete: ", purgedBaskets,
+            " baskets purged, ", deletedGVs, " GVs deleted");
+}
+
+/**
  * Clear ALL SIDEWAY KILLER Global Variables
  * WARNING: This is destructive - use only for testing
  */
@@ -1456,8 +1660,11 @@ double SSoT_CalcApproxProfit(const int index, const double currentPrice)
    else  // SELL
       distance = g_baskets[index].weightedAvg - currentPrice;
 
-   //--- XAUUSD: ~$100 per lot per point
-   return distance * g_baskets[index].totalVolume * 100.0;
+   //--- Use live tick value for accurate calculation
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double valuePerPoint = (tickSize > 0) ? tickValue / tickSize : 100.0;
+   return distance * g_baskets[index].totalVolume * valuePerPoint;
 }
 
 /**

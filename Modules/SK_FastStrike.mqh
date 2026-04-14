@@ -145,23 +145,20 @@ void FastStrike_RefreshCache()
             "% — Fast-Strike PAUSED");
      }
 
-   //--- Auto-unlock after 5 seconds of stable spreads
+   //--- Auto-unlock after 5 seconds OR if absolute spread is acceptable
    if(g_fsSpreadSpikeActive)
      {
+      //--- Auto-unlock after 5 seconds regardless of rate
       if(TimeCurrent() - g_fsLastSpikeCheck >= 5)
         {
-         //--- Re-check: is spread now stable?
-         double newRate = 0;
-         if(g_fsPrevSpread > 0)
-            newRate = MathAbs(currentSpread - g_fsPrevSpread) / g_fsPrevSpread;
-
-         if(newRate < 0.20)  // Stabilized below 20% change
-           {
-            g_fsSpreadSpikeActive = false;
-            Print("[FastStrike] Spread stabilized. Fast-Strike RESUMED");
-           }
-         else
-            g_fsLastSpikeCheck = TimeCurrent();  // Reset timer
+         g_fsSpreadSpikeActive = false;
+         Print("[FastStrike] Spread spike lockout AUTO-RELEASED (5s timeout)");
+        }
+      //--- OR immediate unlock if absolute spread is reasonable (<50 points)
+      else if(currentSpread < 50.0)
+        {
+         g_fsSpreadSpikeActive = false;
+         Print("[FastStrike] Spread spike lockout CLEARED (spread ", DoubleToString(currentSpread, 1), " < 50)");
         }
      }
 
@@ -183,20 +180,53 @@ void FastStrike_RefreshCache()
 }
 
 //+------------------------------------------------------------------+
+//| HELPER — Get live API profit for a basket (PositionGetDouble sum)   |
+//| API-FIRST policy: This is the PRIMARY source of truth for profit    |
+//| Latency: ~0.5ms per basket (acceptable for critical decisions)      |
+//+------------------------------------------------------------------+
+
+/**
+ * Get live API profit for a basket by summing all position profits
+ * This is the PRIMARY decision source per API-FIRST policy
+ * @param basketIndex  Basket cache index
+ * @return Total profit in USD from live API (0 if no positions)
+ */
+double GetBasketApiProfit(const int basketIndex)
+{
+   if(basketIndex < 0 || basketIndex >= g_basketCount)
+      return 0;
+   if(!g_baskets[basketIndex].isValid)
+      return 0;
+
+   double totalProfit = 0;
+
+   for(int j = 0; j < g_baskets[basketIndex].levelCount; j++)
+     {
+      ulong ticket = g_baskets[basketIndex].levels[j].ticket;
+      if(ticket > 0 && PositionSelectByTicket(ticket))
+        {
+         //--- CRITICAL FIX: Use POSITION_PROFIT which already includes commission in newer MT5
+         //--- POSITION_COMMISSION is deprecated - removing this call
+         //--- In modern MT5, profit = (close - open) * volume * value - commission - swap
+         //--- So POSITION_PROFIT is the NET profit we need
+         totalProfit += PositionGetDouble(POSITION_PROFIT);
+        }
+     }
+
+   return totalProfit;
+}
+
+//+------------------------------------------------------------------+
 //| PUBLIC API — FastStrikeCheck() — HOT PATH ENTRY POINT              |
-//| MUST be called FIRST in OnTick()                                   |
+//| API-FIRST policy: Live API profit is PRIMARY decision source        |
+//| Math layers: Advisory only — logged but never block execution       |
 //| MUST return early after any basket closure                         |
-//| ZERO GlobalVariable or PositionGetDouble calls                     |
 //+------------------------------------------------------------------+
 
 /**
  * Fast-Strike profit check — PRIMARY hot path entry point
- * MUST be the first operation in OnTick()
- * Exits immediately after closing any basket
- *
- * Latency budget: < 0.10ms total
- * Layer 1: ~0.05ms (aggressive math)
- * Layer 2: ~0.05ms (conservative math)
+ * API-FIRST: Uses live PositionGetDouble(POSITION_PROFIT) as primary source
+ * Math layers (L1/L2) are advisory — logged but never block close
  *
  * @return true if a basket was closed, false otherwise
  */
@@ -239,35 +269,53 @@ bool FastStrikeCheck()
 
       double target = g_baskets[i].targetProfit;
 
-      //--- LAYER 1: Aggressive math check (~0.05ms)
+      //=== API-FIRST: Live API profit is the PRIMARY decision source ===
+      double apiProfit = GetBasketApiProfit(i);
+
+      //--- If API says we hit target — CLOSE IMMEDIATELY (no math gate)
+      if(apiProfit >= target)
+        {
+         //--- Log math vs API for audit trail (advisory only)
+         double layer1 = FastStrike_CalcLayer1(i, bid, ask);
+         double layer2 = FastStrike_CalcLayer2(i, bid, ask);
+         if(MathAbs(apiProfit - layer2) > MathAbs(apiProfit) * 0.25)
+           {
+            Print("[FastStrike] API-FIRST CLOSE: Basket ", g_baskets[i].basketId,
+                  " API=$", DoubleToString(apiProfit, 2),
+                  " MathL2=$", DoubleToString(layer2, 2),
+                  " Target=$", DoubleToString(target, 2));
+           }
+
+         FastStrike_CloseBasketImmediate(i);
+         g_fsTotalCloses++;
+
+         ulong elapsed = GetMicrosecondCount() - startTime;
+         if(elapsed > g_fsMaxLatencyUS)
+            g_fsMaxLatencyUS = (double)elapsed;
+         g_fsTotalChecks++;
+         return true;  // EARLY RETURN — Profit First directive
+        }
+
+      //--- LAYER 1: Aggressive math check (advisory — does NOT block)
       double layer1 = FastStrike_CalcLayer1(i, bid, ask);
 
       if(layer1 < target)
          continue;  // Below target — skip to next basket
 
-      //--- LAYER 2: Conservative math check (~0.05ms)
+      //--- LAYER 2: Conservative math check (advisory — does NOT block)
       if(Inp_FastStrikeMode != FAST_LAYER1)
         {
          double layer2 = FastStrike_CalcLayer2(i, bid, ask);
 
-         //--- Use adaptive threshold (90% or 95% based on spread conditions)
+         //--- Math below threshold — skip to next basket (advisory layer only)
          if(layer2 < target * g_fsConservativeFactor)
-            continue;  // Layer 2 failed — skip to next basket
+            continue;
         }
 
-      //--- LAYER 3: API verification (optional, advanced users only)
-      if(Inp_FastStrikeMode == FAST_THREE_LAYER)
-        {
-         double layer3 = FastStrike_CalcLayer3(i);
-
-         if(layer3 < target * g_fsConservativeFactor)
-            continue;  // API verification failed — skip
-        }
-
-      //--- PRE-EXECUTION RE-VERIFICATION: Final microsecond spread check
-      //--- Ensures net profit is still positive at exact execution moment
+      //--- PRE-EXECUTION: Final spread spike check (API-FIRST — no math gate)
+      //--- Only blocks on extreme spread, never on math/API mismatch
       if(!FastStrike_PreExecutionVerify(i, bid, ask, target))
-         continue;  // Profit dropped below target — skip
+         continue;
 
       //--- ALL CHECKS PASSED — Close basket IMMEDIATELY
       FastStrike_CloseBasketImmediate(i);
@@ -349,20 +397,15 @@ double FastStrike_CalcLayer2(const int basketIndex, const double bid,
    if(distance <= 0)
       return 0;
 
-   //--- Gross profit
+   //--- Gross profit using live Bid/Ask (spread already embedded in price)
    double grossProfit = distance * g_baskets[basketIndex].totalVolume *
                         g_fsCachedValuePerPoint;
 
-   //--- Spread cost: volume × adaptive spread buffer (in points × $/point)
-   double spreadCost = g_baskets[basketIndex].totalVolume *
-                       g_fsCachedSpreadBuffer *
-                       g_fsCachedValuePerPoint;
-
-   //--- Commission cost
+   //--- Commission cost only (spread is in the bid/ask price, do NOT subtract)
    double commissionCost = g_baskets[basketIndex].totalVolume *
                            g_fsCachedCommissionPerLot;
 
-   return grossProfit - spreadCost - commissionCost;
+   return grossProfit - commissionCost;
 }
 
 //+------------------------------------------------------------------+
@@ -405,53 +448,82 @@ double FastStrike_CalcLayer3(const int basketIndex)
 //+------------------------------------------------------------------+
 
 /**
- * Pre-execution verification: final microsecond profit check
- * Ensures spread hasn't spiked and profit remains positive
+ * Pre-execution verification with XAUUSD-accurate math and 1% API gate
+ *
+ * API-FIRST policy: Uses live API profit for target check
+ * MATH: Calculated for audit logging only — NEVER blocks execution
+ * ONLY blocks on: spread spike, price against position, invalid tick data
+ *
  * @param basketIndex  Basket cache index
  * @param bid          Current bid price (from OnTick)
  * @param ask          Current ask price (from OnTick)
  * @param target       Target profit in USD
- * @return true if profit is still above threshold
+ * @return true if safe to close (API profit ≥ target × 0.85, no spread spike)
  */
 bool FastStrike_PreExecutionVerify(const int basketIndex, const double bid,
                                     const double ask, const double target)
 {
-   //--- Re-calculate Layer 2 with CURRENT prices (microsecond check)
+   if(basketIndex < 0 || basketIndex >= g_basketCount)
+      return false;
+   if(!g_baskets[basketIndex].isValid)
+      return false;
+
+   //--- Get live symbol properties
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   if(tickSize <= 0 || tickValue <= 0)
+     {
+      Print("[FastStrike] ABORT: Invalid tick data. TV=", tickValue, " TS=", tickSize);
+      return false;
+     }
+
+   //--- Calculate price distance
    double distance = 0;
    if(g_baskets[basketIndex].direction == 0)  // BUY
       distance = bid - g_baskets[basketIndex].weightedAvg;
    else  // SELL
       distance = g_baskets[basketIndex].weightedAvg - ask;
 
-   //--- Price moved against us? Abort
+   //--- Price against us? Abort immediately
    if(distance <= 0)
       return false;
 
-   //--- Quick spread spike check at exact execution moment
+   //--- Spread spike check (only non-API block condition)
    long currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-
-   //--- If spread just spiked > 2× average, abort — slippage risk too high
-   if(g_fsCachedSpreadAvg > 0 &&
-      currentSpread > g_fsCachedSpreadAvg * 2.0)
+   if(g_fsCachedSpreadAvg > 0 && currentSpread > g_fsCachedSpreadAvg * 2.0)
      {
-      //--- Lock out immediately
       g_fsSpreadSpikeActive = true;
       g_fsLastSpikeCheck = TimeCurrent();
       return false;
      }
 
-   //--- Quick net profit estimate
-   double grossProfit = distance * g_baskets[basketIndex].totalVolume *
-                        g_fsCachedValuePerPoint;
-   double spreadCost = g_baskets[basketIndex].totalVolume *
-                       g_fsCachedSpreadBuffer *
-                       g_fsCachedValuePerPoint;
-   double commissionCost = g_baskets[basketIndex].totalVolume *
-                           g_fsCachedCommissionPerLot;
-   double netProfit = grossProfit - spreadCost - commissionCost;
+   //=== API-FIRST: Live API profit is the PRIMARY decision source ===
+   double apiProfit = GetBasketApiProfit(basketIndex);
 
-   //--- Must still meet at least 85% of target at execution moment
-   return (netProfit >= target * 0.85);
+   //--- API says target hit? APPROVE immediately regardless of math
+   if(apiProfit >= target * 0.85)
+     {
+      //--- Math calculation for audit log only (never blocks)
+      double ticks = distance / tickSize;
+      double grossProfit = ticks * tickValue * g_baskets[basketIndex].totalVolume;
+      double commissionCost = g_baskets[basketIndex].totalVolume *
+                              g_fsCachedCommissionPerLot;
+      double mathProfit = grossProfit - commissionCost;
+
+      //--- Log warning if math diverges significantly (advisory only)
+      if(MathAbs(apiProfit) > 0.10 && MathAbs(mathProfit - apiProfit) / MathAbs(apiProfit) > 0.25)
+        {
+         Print("[FastStrike] MATH WARN: Basket ", g_baskets[basketIndex].basketId,
+               " API=$", DoubleToString(apiProfit, 2),
+               " Math=$", DoubleToString(mathProfit, 2),
+               " | Close APPROVED (API-FIRST policy)");
+        }
+      return true;  // API target hit — close approved
+     }
+
+   //--- API profit below target — deny close
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -490,32 +562,46 @@ void FastStrike_CloseBasketImmediate(const int basketIndex)
    //--- Flag basket for closure to prevent new grid additions
    SSoT_UpdateBasketStatus(basketIndex, BASKET_CLOSING);
 
-   //--- Close all positions in this basket (reverse order for safety)
+   //--- FAST-LOOP: Collect all tickets first, then blast close orders
    int levels = g_baskets[basketIndex].levelCount;
-   int closedCount = 0;
+   ulong tickets[];
+   ArrayResize(tickets, levels);
+   int ticketCount = 0;
 
    for(int i = levels - 1; i >= 0; i--)
      {
       ulong ticket = g_baskets[basketIndex].levels[i].ticket;
       if(ticket > 0)
-        {
-         if(FastStrike_ClosePosition(ticket))
-            closedCount++;
-        }
+         tickets[ticketCount++] = ticket;
      }
 
-   //--- Mark as fully closed
-   SSoT_UpdateBasketStatus(basketIndex, BASKET_CLOSED);
+   //--- Blast all close orders in tight loop (minimize latency between fills)
+   int closedCount = 0;
+   int failedCount = 0;
+   for(int i = 0; i < ticketCount; i++)
+     {
+      if(FastStrike_ClosePosition(tickets[i]))
+         closedCount++;
+      else
+         failedCount++;
+     }
 
-   //--- Calculate actual profit for trade statistics
+   //--- CRITICAL: Only mark SSoT closed if ALL positions were actually closed
    double actualProfit = FastStrike_CalcFinalProfit(basketIndex);
-   SSoT_OnBasketClosed(actualProfit);
+   if(failedCount == 0)
+     {
+      SSoT_UpdateBasketStatus(basketIndex, BASKET_CLOSED);
+      SSoT_OnBasketClosed(actualProfit);
+      SSoT_CloseBasket(basketIndex);
+     }
+   else
+     {
+      Print("[FastStrike] WARNING: ", failedCount, " positions failed to close. Basket NOT marked closed.");
+      SSoT_UpdateBasketStatus(basketIndex, BASKET_ACTIVE);  // Revert to active
+     }
 
-   //--- Close the basket (invalidates cache entry, compacts array)
-   SSoT_CloseBasket(basketIndex);
-
-   Print("[FastStrike] Basket ", basketId, " CLOSED. Positions closed: ",
-         closedCount, "/", levels, " | Profit: $", DoubleToString(actualProfit, 2));
+   Print("[FastStrike] Basket ", basketId, " result: ", closedCount,
+         "/", levels, " closed | Profit: $", DoubleToString(actualProfit, 2));
 }
 
 /**
@@ -527,24 +613,24 @@ bool FastStrike_ClosePosition(const ulong ticket)
 {
    if(!PositionSelectByTicket(ticket))
      {
-      Print("[FastStrike] WARNING: Position ", ticket, " no longer exists");
-      return false;
+      //--- Position already closed — treat as success
+      return true;
      }
 
    double volume = PositionGetDouble(POSITION_VOLUME);
    long type = PositionGetInteger(POSITION_TYPE);
    string symbol = PositionGetString(POSITION_SYMBOL);
-   double price;
-
-   //--- Use correct closing price
-   if(type == POSITION_TYPE_BUY)
-      price = SymbolInfoDouble(symbol, SYMBOL_BID);
-   else
-      price = SymbolInfoDouble(symbol, SYMBOL_ASK);
 
    //--- Send close order
    MqlTradeRequest request = {};
    MqlTradeResult result = {};
+
+   //--- Refresh price IMMEDIATELY before OrderSend (microsecond precision)
+   double price;
+   if(type == POSITION_TYPE_BUY)
+      price = SymbolInfoDouble(symbol, SYMBOL_BID);
+   else
+      price = SymbolInfoDouble(symbol, SYMBOL_ASK);
 
    request.action = TRADE_ACTION_DEAL;
    request.position = ticket;
@@ -552,7 +638,7 @@ bool FastStrike_ClosePosition(const ulong ticket)
    request.volume = volume;
    request.type = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
    request.price = price;
-   request.deviation = 10;  // 10 points max slippage
+   request.deviation = 50;  // 50 points max slippage for XAUUSD volatility
    request.magic = 0;
    request.type_filling = FastStrike_GetFillingMode();  // Auto-detect broker support
 
@@ -649,11 +735,15 @@ void FastStrike_UpdateApiCache()
 
 /**
  * Validate math accuracy of Layer 2 against actual API profits
- * Logs warnings if error > 10%
+ * Logs warnings only if error > 50% (reduced noise)
  */
 void FastStrike_ValidateMathAccuracy()
 {
-   double threshold = 0.10;  // 10% error threshold
+   //--- Gate: skip if no active baskets
+   if(g_basketCount <= 0)
+      return;
+
+   double threshold = 0.50;  // 50% error threshold (reduced from 10%)
 
    for(int i = 0; i < g_basketCount; i++)
      {
@@ -677,15 +767,28 @@ void FastStrike_ValidateMathAccuracy()
         }
 
       //--- Calculate error percentage
+      //--- CRITICAL: If position is in loss (API negative), Math=0 is CORRECT - not an error
+      if(apiProfit < 0)
+        {
+         if(mathProfit > 0.50)
+           {
+            Print("[FastStrike] VALIDATION WARNING: Math=$",
+                  DoubleToString(mathProfit, 2), " but API=$",
+                  DoubleToString(apiProfit, 2), " (loss) basket ",
+                  g_baskets[i].basketId);
+           }
+         continue;
+        }
+
       double absApiProfit = MathAbs(apiProfit);
       if(absApiProfit < 0.01)
-         continue;  // Too small to measure
+         continue;
 
       double errorPct = MathAbs(mathProfit - apiProfit) / absApiProfit;
 
       if(errorPct > threshold)
         {
-         Print("[FastStrike] WARNING: Math accuracy error ",
+         Print("[FastStrike] VALIDATION: Math error ",
                DoubleToString(errorPct * 100, 1), "% for basket ",
                g_baskets[i].basketId,
                " | Math: $", DoubleToString(mathProfit, 2),

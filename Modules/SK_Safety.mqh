@@ -162,19 +162,24 @@ void Safety_UpdateHeatCache()
          currentPrice = ask;
 
       //--- Calculate drawdown (0 if in profit)
+      //--- CRITICAL FIX: Use live tickValue/tickSize instead of hardcoded 100.0
+      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      double valuePerPoint = (tickSize > 0) ? tickValue / tickSize : 100.0;
+
       double drawdown = 0;
       if(g_baskets[i].direction == 0)  // BUY
         {
          if(currentPrice < g_baskets[i].weightedAvg)
             drawdown = (g_baskets[i].weightedAvg - currentPrice) *
-                       g_baskets[i].totalVolume * 100.0;
+                       g_baskets[i].totalVolume * valuePerPoint;
          //--- Else: in profit → drawdown = 0
         }
       else  // SELL
         {
          if(currentPrice > g_baskets[i].weightedAvg)
             drawdown = (currentPrice - g_baskets[i].weightedAvg) *
-                       g_baskets[i].totalVolume * 100.0;
+                       g_baskets[i].totalVolume * valuePerPoint;
          //--- Else: in profit → drawdown = 0
         }
 
@@ -290,6 +295,11 @@ bool Safety_EnforceRecoveryHeatLimit(const int basketIndex)
    //--- Negative balance: block everything
    if(g_negativeBalanceDetected)
       return false;
+
+   //--- MARGIN BYPASS: If margin level > 500%, allow grid scaling regardless of heat
+   double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+   if(marginLevel > 500.0)
+      return true;
 
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    if(balance <= 0)
@@ -618,10 +628,28 @@ bool Safety_IsOperationAllowed(const string operationType, const int basketIndex
    if(g_negativeBalanceDetected)
       return false;
 
+   //--- MARGIN BYPASS: If margin level > 500%, allow all operations
+   double marginLevel = AccountInfoDouble(ACCOUNT_MARGIN_LEVEL);
+   if(marginLevel > 500.0)
+      return true;
+
    if(operationType == "GRID")
      {
-      //--- Check spread and margin guards
-      if(g_spreadHalted || g_marginHalted)
+      //--- REAL-TIME SPREAD CHECK: Bypass stale g_spreadHalted flag
+      //--- If current spread is acceptable (< 100 pts), allow grid operations
+      long currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+      if(currentSpread < DEF_MAX_SPREAD_POINTS)
+        {
+         // Spread is fine right now — allow grid regardless of stale flag
+         g_spreadHalted = false;
+        }
+      else if(g_spreadHalted)
+        {
+         return false;  // Spread is actually too high — block
+        }
+
+      //--- Check margin guard
+      if(g_marginHalted)
          return false;
 
       //--- Check per-basket recovery heat

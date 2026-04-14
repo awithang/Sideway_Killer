@@ -63,10 +63,26 @@ bool Grid_Init()
    g_gridCachedSpikeMult = 1.0;
    g_gridCachedAdjustedBase = Inp_DVASS_BaseStep;
 
+   //--- CRITICAL: Refresh cache immediately to get valid ATR values
+   //--- Prevents 560-point spacing fallback on first grid check
+   Grid_RefreshCache();
+
+   //--- If ATR is still 0 after refresh, seed with a reasonable default
+   //--- to prevent FIXED mode fallback causing excessive spacing
+   if(g_gridCachedATR14 <= 0)
+     {
+      g_gridCachedATR14 = Inp_DVASS_ATRNorm / 2.0;  // 10.0 default
+      g_gridCachedAdjustedBase = Inp_DVASS_BaseStep * 0.5;  // 125.0
+      Print("[Grid] ATR not ready — using default ", g_gridCachedATR14,
+            " pts, adjusted base = ", g_gridCachedAdjustedBase);
+     }
+
    Print("[Grid] Initialized. Mode: ",
          (Inp_GridMode == GRID_FIXED ? "FIXED" :
           Inp_GridMode == GRID_DVASS ? "DVASS" :
-          Inp_GridMode == GRID_HYBRID ? "HYBRID" : "UNKNOWN"));
+          Inp_GridMode == GRID_HYBRID ? "HYBRID" : "UNKNOWN"),
+         " ATR14=", DoubleToString(g_gridCachedATR14, 2),
+         " Base=", DoubleToString(g_gridCachedAdjustedBase, 2));
 
    return true;
 }
@@ -439,11 +455,18 @@ void Grid_AddLevel(const int basketIndex, const double bid, const double ask)
 
    int direction = g_baskets[basketIndex].direction;
    double entryPrice;
+   ENUM_ORDER_TYPE orderType;
 
    if(direction == 0)  // BUY
-      entryPrice = bid;
-   else  // SELL
+     {
       entryPrice = ask;
+      orderType = ORDER_TYPE_BUY;
+     }
+   else  // SELL
+     {
+      entryPrice = bid;
+      orderType = ORDER_TYPE_SELL;
+     }
 
    //--- Calculate lot size using lot multiplier system
    int newLevel = g_baskets[basketIndex].levelCount;
@@ -461,17 +484,75 @@ void Grid_AddLevel(const int basketIndex, const double bid, const double ask)
       return;
      }
 
-   //--- Add level via SSoT (write-through to GVs)
-   //--- Use ticket 0 as placeholder — actual order execution handled by caller
-   //--- In the full integration, OrderSend is called before SSoT_AddGridLevel
-   ulong tempTicket = 0;  // Will be replaced with real ticket after OrderSend
-   bool added = SSoT_AddGridLevel(basketIndex, tempTicket, newLot, entryPrice);
+   //=== EXECUTE REAL TRADE — OrderSend to broker ===
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = newLot;
+   request.type = orderType;
+   request.price = entryPrice;
+   request.deviation = 50;  // 50 points slippage for XAUUSD
+   request.magic = g_baskets[basketIndex].originalMagic;
+   request.type_filling = Grid_GetFillingMode();
+   request.comment = "SK_Grid_L" + IntegerToString(newLevel);
+
+   if(!OrderSend(request, result))
+     {
+      Print("[Grid] ERROR: OrderSend failed for basket ",
+            g_baskets[basketIndex].basketId,
+            " | Error: ", GetLastError(),
+            " | Retcode: ", result.retcode);
+      return;  // Do NOT update SSoT if broker rejected
+     }
+
+   if(result.retcode != TRADE_RETCODE_DONE &&
+      result.retcode != TRADE_RETCODE_DONE_PARTIAL)
+     {
+      Print("[Grid] ERROR: Order not filled for basket ",
+            g_baskets[basketIndex].basketId,
+            " | Retcode: ", result.retcode);
+      return;  // Do NOT update SSoT if not filled
+     }
+
+   //--- Get real ticket from broker
+   ulong realTicket = result.order;
+   if(realTicket <= 0)
+      realTicket = result.deal;  // Fallback to deal ticket
+
+   //--- Add level to SSoT with REAL ticket
+   bool added = SSoT_AddGridLevel(basketIndex, realTicket, newLot, entryPrice);
 
    if(added)
      {
-      //--- Update cooldown
+      Print("[Grid] Level added: Basket ", g_baskets[basketIndex].basketId,
+            " Level ", newLevel,
+            " Ticket ", realTicket,
+            " Lots ", newLot,
+            " Price ", entryPrice);
       g_lastGridAddTime = TimeCurrent();
      }
+   else
+     {
+      Print("[Grid] WARNING: SSoT update failed for basket ",
+            g_baskets[basketIndex].basketId,
+            " but broker order ", realTicket, " was filled");
+     }
+}
+
+//+------------------------------------------------------------------+
+//| FILLING MODE HELPER — Auto-detect broker support for grid orders   |
+//+------------------------------------------------------------------+
+
+ENUM_ORDER_TYPE_FILLING Grid_GetFillingMode()
+{
+   long fillingMask = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((fillingMask & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      return ORDER_FILLING_FOK;
+   if((fillingMask & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      return ORDER_FILLING_IOC;
+   return ORDER_FILLING_FOK;  // Default fallback
 }
 
 //+------------------------------------------------------------------+

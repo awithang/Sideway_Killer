@@ -11,6 +11,7 @@
 #include "SK_GVSchema.mqh"
 #include "SK_SSoT.mqh"
 #include "SK_Safety.mqh"
+#include "SK_Adoption.mqh"
 
 //+==================================================================+
 //| COMMAND CENTER DASHBOARD - Interactive Top-Right UI                |
@@ -304,11 +305,20 @@ double Dashboard_CalculateTotalFloatingPnL(const double bid, const double ask)
       if(!g_baskets[i].isValid || g_baskets[i].status != BASKET_ACTIVE)
          continue;
 
-      double currentPrice = (g_baskets[i].direction == 0) ? bid : ask;
-      double diff = (g_baskets[i].direction == 0) ?
-                    (currentPrice - g_baskets[i].weightedAvg) :
-                    (g_baskets[i].weightedAvg - currentPrice);
-      totalPnL += diff * g_baskets[i].totalVolume * 100.0;
+      //--- CRITICAL FIX: Use live API profit for accurate P&L display
+      //--- In modern MT5, POSITION_PROFIT already includes commission and swap
+      //--- POSITION_COMMISSION is deprecated - removing this call
+      double basketPnL = 0;
+      for(int j = 0; j < g_baskets[i].levelCount; j++)
+        {
+         ulong ticket = g_baskets[i].levels[j].ticket;
+         if(ticket > 0 && PositionSelectByTicket(ticket))
+           {
+            basketPnL += PositionGetDouble(POSITION_PROFIT);  // Already includes all fees
+           }
+        }
+
+      totalPnL += basketPnL;
      }
    return totalPnL;
 }
@@ -391,9 +401,12 @@ void Dashboard_UpdateTrailingTracker()
       double currentPrice = (g_baskets[i].direction == 0) ?
                             SymbolInfoDouble(_Symbol, SYMBOL_BID) :
                             SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+      double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+      double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+      double valuePerPoint = (tickSize > 0) ? tickValue / tickSize : 100.0;
       double currentPnL = (g_baskets[i].direction == 0) ?
-                          ((currentPrice - g_virtualTrail[i].peakPrice) * g_baskets[i].totalVolume * 100.0) :
-                          ((g_virtualTrail[i].peakPrice - currentPrice) * g_baskets[i].totalVolume * 100.0);
+                          ((currentPrice - g_virtualTrail[i].peakPrice) * g_baskets[i].totalVolume * valuePerPoint) :
+                          ((g_virtualTrail[i].peakPrice - currentPrice) * g_baskets[i].totalVolume * valuePerPoint);
 
       if(info != "") info += " | ";
       info += "#" + IntegerToString((int)g_baskets[i].basketId) +
@@ -752,8 +765,9 @@ void Dashboard_OnBuyClick()
             int basketIdx = SSoT_CreateBasket(ticket, openPrice, lotSize, 0, 0);
             if(basketIdx >= 0)
               {
+               //--- CRITICAL: Mark ticket as adopted to prevent re-adoption loop
+               Adoption_MarkTicketAdopted(ticket);
                Print("[Dashboard] Position ", ticket, " immediately adopted");
-               //--- FIX: Immediate sync to prevent 60s cache-wipe delay
                SSoT_UpdateDashboard();
                Dashboard_FullUpdate();
                ChartRedraw();
@@ -821,8 +835,9 @@ void Dashboard_OnSellClick()
             int basketIdx = SSoT_CreateBasket(ticket, openPrice, lotSize, 1, 0);
             if(basketIdx >= 0)
               {
+               //--- CRITICAL: Mark ticket as adopted to prevent re-adoption loop
+               Adoption_MarkTicketAdopted(ticket);
                Print("[Dashboard] Position ", ticket, " immediately adopted");
-               //--- FIX: Immediate sync to prevent 60s cache-wipe delay
                SSoT_UpdateDashboard();
                Dashboard_FullUpdate();
                ChartRedraw();
@@ -881,15 +896,33 @@ void Dashboard_OnCloseAllClick()
 
          SSoT_UpdateBasketStatus(i, BASKET_CLOSING);
 
+         //--- Track close success for each position
+         int levelSuccess = 0;
+         int levelFailed = 0;
          for(int j = g_baskets[i].levelCount - 1; j >= 0; j--)
            {
             ulong ticket = g_baskets[i].levels[j].ticket;
             if(ticket > 0)
-               FastStrike_ClosePosition(ticket);
+              {
+               if(FastStrike_ClosePosition(ticket))
+                  levelSuccess++;
+               else
+                  levelFailed++;
+              }
            }
 
-         SSoT_CloseBasket(i);
-         closedCount++;
+         //--- Only mark basket closed if ALL positions were confirmed closed
+         if(levelFailed == 0)
+           {
+            SSoT_CloseBasket(i);
+            closedCount++;
+           }
+         else
+           {
+            Print("[Dashboard] WARNING: Basket ", g_baskets[i].basketId,
+                  " had ", levelFailed, " positions fail to close. Basket NOT marked closed.");
+            SSoT_UpdateBasketStatus(i, BASKET_ACTIVE);  // Revert
+           }
         }
 
       g_dashStatusMsg = "CLOSE ALL COMPLETE: " + IntegerToString(closedCount) + " baskets";
