@@ -388,29 +388,22 @@ void SSoT_RefreshCacheFromGlobals()
    //--- If basketCount == 0 but positions exist, force immediate rebuild
    if(g_basketCount == 0)
      {
-      //--- Check if ANY physical positions exist for our EA
+      //--- Check if ANY physical positions exist
       bool hasPositions = false;
       ulong foundTicket = 0;
 
-      if(PositionSelectByTicket(0))
+      int total = PositionsTotal();
+      for(int i = 0; i < total; i++)
         {
-         //--- Iterate through all positions
-         int total = PositionsTotal();
-         for(int i = 0; i < total; i++)
-           {
-            if(PositionSelectByIndex(PositionGetInteger(POSITION_TICKET)))
-              {
-               ulong ticket = PositionGetInteger(POSITION_TICKET);
-               ulong magic = PositionGetInteger(POSITION_MAGIC);
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0)
+            continue;
 
-               //--- Check if this is our EA's position
-               if(magic == Inp_EAMagic || magic == Inp_GridMagic)
-                 {
-                  hasPositions = true;
-                  foundTicket = ticket;
-                  break;
-                 }
-              }
+         if(PositionSelectByTicket(ticket))
+           {
+            hasPositions = true;
+            foundTicket = ticket;
+            break;
            }
         }
 
