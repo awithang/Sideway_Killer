@@ -733,68 +733,10 @@ void FastStrike_UpdateApiCache()
 //| Logs warnings if error exceeds threshold                            |
 //+------------------------------------------------------------------+
 
-/**
- * Validate math accuracy of Layer 2 against actual API profits
- * Logs warnings only if error > 50% (reduced noise)
- */
-void FastStrike_ValidateMathAccuracy()
-{
-   //--- Gate: skip if no active baskets
-   if(g_basketCount <= 0)
-      return;
-
-   double threshold = 0.50;  // 50% error threshold (reduced from 10%)
-
-   for(int i = 0; i < g_basketCount; i++)
-     {
-      if(!g_baskets[i].isValid)
-         continue;
-      if(g_baskets[i].status != BASKET_ACTIVE)
-         continue;
-
-      //--- Get Layer 2 estimate
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double mathProfit = FastStrike_CalcLayer2(i, bid, ask);
-
-      //--- Get actual API profit
-      double apiProfit = 0;
-      for(int j = 0; j < g_baskets[i].levelCount; j++)
-        {
-         ulong ticket = g_baskets[i].levels[j].ticket;
-         if(ticket > 0 && PositionSelectByTicket(ticket))
-            apiProfit += PositionGetDouble(POSITION_PROFIT);
-        }
-
-      //--- Calculate error percentage
-      //--- CRITICAL: If position is in loss (API negative), Math=0 is CORRECT - not an error
-      if(apiProfit < 0)
-        {
-         if(mathProfit > 0.50)
-           {
-            Print("[FastStrike] VALIDATION WARNING: Math=$",
-                  DoubleToString(mathProfit, 2), " but API=$",
-                  DoubleToString(apiProfit, 2), " (loss) basket ",
-                  g_baskets[i].basketId);
-           }
-         continue;
-        }
-
-      double absApiProfit = MathAbs(apiProfit);
-      if(absApiProfit < 0.01)
-         continue;
-
-      double errorPct = MathAbs(mathProfit - apiProfit) / absApiProfit;
-
-      if(errorPct > threshold)
-        {
-         Print("[FastStrike] VALIDATION: Math error ",
-               DoubleToString(errorPct * 100, 1), "% for basket ",
-               g_baskets[i].basketId,
-               " | Math: $", DoubleToString(mathProfit, 2),
-               " | API: $", DoubleToString(apiProfit, 2));
-        }
-     }
-}
-
 //+------------------------------------------------------------------+
+//| DELETED: FastStrike_ValidateMathAccuracy()                       |
+//| USER DIRECTIVE: "Delete the profit validation logic immediately" |
+//| As long as PositionSelectByTicket() confirms trade exists,        |
+//| basket MUST stay active. No more math-based discrepancies.       |
+//+------------------------------------------------------------------+
+

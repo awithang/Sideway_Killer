@@ -154,13 +154,9 @@ void Dashboard_TimerCycle()
          Adoption_ExecuteScan();
 
       FastStrike_UpdateApiCache();
-      static int validateCounter = 0;
-      validateCounter++;
-      if(validateCounter >= 10)
-        {
-         validateCounter = 0;
-         FastStrike_ValidateMathAccuracy();
-        }
+      //--- DELETED: FastStrike_ValidateMathAccuracy() per user directive
+      //--- "As long as PositionSelectByTicket() confirms trade exists,
+      //---  basket MUST stay active. No more math-based discrepancies."
 
       Trailing_UpdateCheckpointSystem();
       Trailing_ManageEmergencyStops();
