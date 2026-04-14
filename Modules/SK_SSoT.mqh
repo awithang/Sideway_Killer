@@ -324,11 +324,11 @@ void SSoT_RefreshCacheFromGlobals()
       if(!GlobalVariableCheck(statusName))
          continue;
 
-      double statusVal = GlobalVariableGet(statusName);
-
-      //--- Skip closed baskets
-      if(statusVal >= 2.0)
-         continue;
+      //--- CRITICAL FIX: Do NOT skip closed baskets here!
+      //--- Let SSoT_ReadBasketFromGlobals() handle closed baskets with its
+      //--- built-in physical position check (emergency orphan recovery)
+      //--- PREVIOUS BUG: Skipping here prevented recovery of baskets with
+      //--- physical positions but marked CLOSED in GVs
 
       //--- Read full basket from GVs
       BasketCache tempBasket;
