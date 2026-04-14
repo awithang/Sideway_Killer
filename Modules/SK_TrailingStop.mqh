@@ -190,7 +190,7 @@ double Trailing_CalculateMinimumStop(const int basketIndex,
    if(g_baskets[basketIndex].direction == 0)  // BUY
       minStop = g_baskets[basketIndex].weightedAvg + priceBuffer - costBuffer;
    else  // SELL
-      minStop = g_baskets[basketIndex].weightedAvg - priceBuffer + costBuffer;
+      minStop = g_baskets[basketIndex].weightedAvg + priceBuffer + costBuffer;
 
    return minStop;
 }
@@ -217,6 +217,11 @@ bool Trailing_ShouldHandover(const int basketIndex, const double apiProfit)
 
    //--- Already handed over?
    if(g_trailIsHandedOver[basketIndex])
+      return false;
+
+   //--- CRITICAL: ONLY handover when actually profitable (Net Profit > 0)
+   //--- Do NOT attempt trailing if position is in loss
+   if(apiProfit <= 0)
       return false;
 
    //--- API-FIRST: Profit must meet target × 0.95
