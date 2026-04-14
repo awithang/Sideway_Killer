@@ -224,11 +224,8 @@ bool Trailing_ShouldHandover(const int basketIndex, const double apiProfit)
    if(apiProfit < target * 0.95)
       return false;
 
-   //--- Minimum handover age gate (120 seconds)
-   datetime now = TimeCurrent();
-   int basketAge = (int)(now - g_baskets[basketIndex].created);
-   if(basketAge < HANDOVER_MIN_AGE_SECONDS)
-      return false;
+   //--- CRITICAL: NO age gate — instant handover when profit target hit
+   // This allows capturing long trends (1,000+ points) by letting trailing run
 
    return true;
 }
@@ -976,26 +973,29 @@ bool IsConnectionStable()
 }
 
 //+------------------------------------------------------------------+
-//| INTEGRATION: FastStrike with Immediate Close Protocol              |
-//| This function replaces FastStrikeCheck with immediate close logic  |
+//| INTEGRATION: FastStrike with Instant Handover Protocol            |
+//| This function replaces FastStrikeCheck with instant handover logic |
 //| Called from OnTick() as the primary profit check entry point       |
-//| CRITICAL: Closes immediately when Broker Net Profit >= Target      |
+//| CRITICAL: Hands over to Trailing immediately when profit hit       |
+//| Allows capturing long trends (1,000+ points) via trailing module   |
 //+------------------------------------------------------------------+
 
 /**
- * Fast-Strike with Immediate Close Protocol
+ * Fast-Strike with Instant Handover Protocol
  * This replaces the standalone FastStrikeCheck() from Phase 4
  *
  * API-FIRST Flow:
  * 1. Layer 1 + Layer 2 checks (unchanged — advisory only)
  * 2. If Broker Net Profit >= Target:
- *    → CLOSE IMMEDIATELY — NO handover, NO 120s age gate delay
- * 3. If already handed over → skip (trailing manages it)
+ *    → INSTANT HANDOVER to Trailing — ZERO age gate, ZERO delay
+ * 3. Trailing sets Break-Even stop to protect profit, then lets trend run
+ * 4. If already handed over → skip (trailing manages it)
  *
  * CRITICAL: Uses Broker's POSITION_PROFIT directly (no math calculations).
- * When target is hit, OrderClose executes WITHOUT waiting for Trailing Stop.
+ * When target is hit, hands over to Trailing IMMEDIATELY to capture long trends.
+ * The Break-Even stop protects the $10 profit while following the trend.
  *
- * @return true if a basket was closed
+ * @return true if a basket was handed over to trailing
  */
 bool FastStrikeCheckWithHandover()
 {
@@ -1048,17 +1048,18 @@ bool FastStrikeCheckWithHandover()
          if(!FastStrike_PreExecutionVerify(i, bid, ask, target))
             continue;
 
-         //--- CRITICAL: CLOSE IMMEDIATELY when API profit >= target
-         // NO handover delay, NO 120s age gate — execute OrderClose without delay
-         FastStrike_CloseBasketImmediate(i);
-         g_fsTotalCloses++;
+         //--- CRITICAL: INSTANT HANDOVER when API profit >= target
+         // NO age gate, ZERO delay — handover to trailing immediately
+         // Trailing will set Break-Even stop to protect profit, then let trend run
+         Trailing_HandOverToTrailing(i, apiProfit, bid, ask);
+         g_fsTotalChecks++;
          return true;
         }
       else
         {
-         //--- Layer 1 only mode (aggressive) — same immediate close behavior
-         FastStrike_CloseBasketImmediate(i);
-         g_fsTotalCloses++;
+         //--- Layer 1 only mode (aggressive) — same instant handover behavior
+         Trailing_HandOverToTrailing(i, apiProfit, bid, ask);
+         g_fsTotalChecks++;
          return true;
         }
      }
