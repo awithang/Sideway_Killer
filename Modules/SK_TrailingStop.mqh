@@ -190,7 +190,7 @@ double Trailing_CalculateMinimumStop(const int basketIndex,
    if(g_baskets[basketIndex].direction == 0)  // BUY
       minStop = g_baskets[basketIndex].weightedAvg + priceBuffer - costBuffer;
    else  // SELL
-      minStop = g_baskets[basketIndex].weightedAvg + priceBuffer + costBuffer;
+      minStop = g_baskets[basketIndex].weightedAvg - priceBuffer + costBuffer;
 
    return minStop;
 }
