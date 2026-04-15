@@ -174,6 +174,11 @@ void Adoption_ScanOrphansOnStartup();
 bool Adoption_IsTicketAdopted(const ulong ticket);  // Added for GV-persistent check
 void Adoption_LoadFromGVs();  // Added for GV-persistent adoption tracking
 
+//--- Forward declarations for parallel-array compact support
+void Safety_ShiftBasketArrays(const int fromIdx, const int toIdx);
+void Trailing_ShiftBasketArrays(const int fromIdx, const int toIdx);
+void FastStrike_ShiftBasketArrays(const int fromIdx, const int toIdx);
+
 //+------------------------------------------------------------------+
 //| HOT PATH: Cache-only read operations                               |
 //| CRITICAL: These functions MUST NOT call any GlobalVariable API     |
@@ -786,8 +791,7 @@ bool SSoT_AddGridLevel(const int basketIndex, const ulong ticket,
    //--- Write-through to SSoT
    SSoT_WriteBasketToGlobals(basketIndex);
 
-   //--- Update cooldown
-   g_lastGridAddTime = TimeCurrent();
+   //--- Per-basket cooldown is managed by Grid_AddLevel()
 
    Print("[SSoT] Grid level added: Basket=", g_baskets[basketIndex].basketId,
          " Level=", newLevel,
@@ -914,6 +918,11 @@ void SSoT_CompactBaskets()
             g_virtualTrail[writeIdx] = g_virtualTrail[readIdx];
             g_checkpoint[writeIdx] = g_checkpoint[readIdx];
             g_apiCache[writeIdx] = g_apiCache[readIdx];
+            g_hasEmergencyStops[writeIdx] = g_hasEmergencyStops[readIdx];
+            g_emergencyStopSetTime[writeIdx] = g_emergencyStopSetTime[readIdx];
+            Safety_ShiftBasketArrays(readIdx, writeIdx);
+            Trailing_ShiftBasketArrays(readIdx, writeIdx);
+            FastStrike_ShiftBasketArrays(readIdx, writeIdx);
            }
          writeIdx++;
         }
@@ -927,6 +936,10 @@ void SSoT_CompactBaskets()
       g_virtualTrail[i].isActivated = false;
       g_virtualTrail[i].peakPrice = 0;
       g_virtualTrail[i].stopLevel = 0;
+      g_apiCache[i].isValid = false;
+      g_apiCache[i].verifiedProfit = 0;
+      g_hasEmergencyStops[i] = false;
+      g_emergencyStopSetTime[i] = 0;
      }
 
    g_basketCount = writeIdx;
@@ -1074,7 +1087,7 @@ void SSoT_WriteBasketToGlobals(const int basketIndex)
         {
          Print("[SSoT] CRITICAL: Basket ", id, " write FAILED after retry - marking invalid");
          g_baskets[basketIndex].isValid = false;
-         g_basketCount--;  // Revert count
+         SSoT_CompactBaskets();  // Properly remove gap and sync all parallel arrays
          return;  // Don't mark as valid if write failed
         }
      }

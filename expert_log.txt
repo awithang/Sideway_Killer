@@ -1,0 +1,21 @@
+MD	0	08:51:36.179	SideWayKiller (XAUUSD,M15)	[SSoT] Initialized. Schema v1, Max baskets: 20, Max levels: 7
+PP	0	08:51:36.179	SideWayKiller (XAUUSD,M15)	[Adoption] Loaded 0 adopted tickets from GV persistence
+OQ	0	08:51:36.179	SideWayKiller (XAUUSD,M15)	[SSoT] Loaded from GVs. Baskets: 0 Next ID: 1
+HD	0	08:51:36.179	SideWayKiller (XAUUSD,M15)	[Adoption] Initialized. Mode: ADOPT_SMART
+JG	0	08:51:36.293	SideWayKiller (XAUUSD,M15)	[Grid] Initialized. Mode: DVASS ATR14=10.21 Base=689.46
+IN	0	08:51:36.293	SideWayKiller (XAUUSD,M15)	[Lot] Initialized. Mode: FIXED | Trades: 0 | WinRate: 65.0%
+FR	0	08:51:36.293	SideWayKiller (XAUUSD,M15)	[FastStrike] Initialized. Mode: TWO_LAYER | ValuePerPoint: $100.00
+NG	0	08:51:36.293	SideWayKiller (XAUUSD,M15)	[Trailing] Initialized. ATR-Direct mode, 1.5× multiplier
+KE	0	08:51:36.293	SideWayKiller (XAUUSD,M15)	[Safety] Initialized. Heat limits: Recovery=5.0% Total=10.0%
+CJ	0	08:51:36.300	SideWayKiller (XAUUSD,M15)	[Dashboard] Command Center initialized. Baskets in cache: 0
+IJ	0	08:51:36.300	SideWayKiller (XAUUSD,M15)	[INIT] SIDEWAY KILLER v1.0.0 initialized. Active baskets: 0 | Cache valid: false
+NK	0	08:51:38.309	SideWayKiller (XAUUSD,M15)	[FastStrike] WARNING: Spread spike detected! Change rate: 220.0% — Fast-Strike PAUSED
+JD	0	08:51:38.309	SideWayKiller (XAUUSD,M15)	[FastStrike] Spread spike lockout CLEARED (spread 32.0 < 50)
+QR	0	08:52:02.214	SideWayKiller (XAUUSD,M15)	[Dashboard] SELL executed: Ticket=115515442 Lot=0.05 Price=4845.74 Filling=ORDER_FILLING_FOK
+MG	0	08:52:02.314	SideWayKiller (XAUUSD,M15)	[SSoT] Basket created: ID=1 Ticket=115515442 Dir=SELL Lots=0.05 Price=4845.74
+DE	0	08:52:02.314	SideWayKiller (XAUUSD,M15)	[Dashboard] Position 115515442 immediately adopted
+GN	0	08:55:47.744	SideWayKiller (XAUUSD,M15)	[Trailing] HANDOVER: Basket 1 handed to trailing at profit $10.20 | Peak: 4843.70000 | TrailDist: 25.0 pts | MinStop: 4843.72000
+II	0	08:55:49.298	SideWayKiller (XAUUSD,M15)	[Trailing] TRIGGERED: Basket 1 at 4843.51000 (stop: 4843.47000) — Peak was: 4843.22000
+LJ	0	08:55:49.531	SideWayKiller (XAUUSD,M15)	[Trailing] Position 115515442 closed at 4843.51000
+GS	0	08:55:49.531	SideWayKiller (XAUUSD,M15)	[Trailing] Basket 1 close result: 1 closed, 0 failed
+FS	0	08:55:49.531	SideWayKiller (XAUUSD,M15)	[SSoT] Basket closed & GVs flushed: ID=1

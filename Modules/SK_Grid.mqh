@@ -37,6 +37,9 @@ int     g_gridAtrHandle5 = INVALID_HANDLE;
 double  g_gridBufATR14[];
 double  g_gridBufATR5[];
 
+//--- Per-basket grid cooldown (prevents global block when one basket adds)
+datetime g_basketLastGridAddTime[SK_MAX_BASKETS];
+
 //+------------------------------------------------------------------+
 //| PUBLIC API — Initialization                                        |
 //+------------------------------------------------------------------+
@@ -62,6 +65,7 @@ bool Grid_Init()
    g_gridCachedATR5 = 0;
    g_gridCachedSpikeMult = 1.0;
    g_gridCachedAdjustedBase = Inp_DVASS_BaseStep;
+   ArrayInitialize(g_basketLastGridAddTime, 0);
 
    //--- CRITICAL: Refresh cache immediately to get valid ATR values
    //--- Prevents 560-point spacing fallback on first grid check
@@ -367,16 +371,16 @@ ENUM_VOL_REGIME Grid_DetectRegime(const double atr)
  */
 void CheckGridLevels(const double bid, const double ask)
 {
-   //--- Cooldown check: prevent over-trading
-   if(g_lastGridAddTime > 0 &&
-      (TimeCurrent() - g_lastGridAddTime) < DEF_GRID_COOLDOWN_SECONDS)
-      return;
-
    for(int i = 0; i < g_basketCount; i++)
      {
       if(!g_baskets[i].isValid)
          continue;
       if(g_baskets[i].status != BASKET_ACTIVE)
+         continue;
+
+      //--- Per-basket cooldown check
+      if(g_basketLastGridAddTime[i] > 0 &&
+         (TimeCurrent() - g_basketLastGridAddTime[i]) < DEF_GRID_COOLDOWN_SECONDS)
          continue;
 
       //--- Skip if already at max levels
@@ -531,7 +535,7 @@ void Grid_AddLevel(const int basketIndex, const double bid, const double ask)
             " Ticket ", realTicket,
             " Lots ", newLot,
             " Price ", entryPrice);
-      g_lastGridAddTime = TimeCurrent();
+      g_basketLastGridAddTime[basketIndex] = TimeCurrent();
      }
    else
      {

@@ -27,6 +27,7 @@
 //+------------------------------------------------------------------+
 
 double  g_heatCache[SK_MAX_BASKETS];       // Per-basket drawdown in USD
+double  g_heatPctCache[SK_MAX_BASKETS];    // Per-basket heat percentage
 double  g_totalHeat = 0;                   // Total portfolio heat %
 double  g_totalDrawdown = 0;               // Total portfolio drawdown $
 
@@ -89,6 +90,7 @@ bool Safety_Init()
    for(int i = 0; i < SK_MAX_BASKETS; i++)
      {
       g_heatCache[i] = 0;
+      g_heatPctCache[i] = 0;
       g_recoveryHalted[i] = false;
       g_recoveryHaltTime[i] = 0;
      }
@@ -184,6 +186,7 @@ void Safety_UpdateHeatCache()
         }
 
       g_heatCache[i] = drawdown;
+      g_heatPctCache[i] = (balance > 0) ? (drawdown / balance) * 100.0 : 100.0;
       g_totalDrawdown += drawdown;
      }
 
@@ -221,11 +224,7 @@ double Safety_GetBasketHeat(const int basketIndex)
    if(!g_baskets[basketIndex].isValid)
       return 0;
 
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   if(balance <= 0)
-      return 100.0;
-
-   return (g_heatCache[basketIndex] / balance) * 100.0;
+   return g_heatPctCache[basketIndex];
 }
 
 /**
@@ -501,6 +500,7 @@ void Safety_CheckAutoResume()
             //--- Check time delay
             if(now - g_recoveryHaltTime[i] >= SAFETY_RESUME_DELAY_SEC)
               {
+               g_recoveryHalted[i] = false;
                Print("[Safety] AUTO-RESUME: Recovery heat normalized to ",
                      DoubleToString(heat, 2), "%",
                      " — Grid additions resumed");
@@ -672,6 +672,22 @@ bool Safety_IsOperationAllowed(const string operationType, const int basketIndex
 
    //--- Default: check all global guards
    return !Safety_IsAnyGuardActive();
+}
+
+//+------------------------------------------------------------------+
+//| PARALLEL ARRAY COMPACT SUPPORT                                     |
+//+------------------------------------------------------------------+
+
+/**
+ * Shift safety-related parallel arrays during basket compaction
+ * Called from SSoT_CompactBaskets()
+ */
+void Safety_ShiftBasketArrays(const int fromIdx, const int toIdx)
+{
+   g_heatCache[toIdx] = g_heatCache[fromIdx];
+   g_heatPctCache[toIdx] = g_heatPctCache[fromIdx];
+   g_recoveryHalted[toIdx] = g_recoveryHalted[fromIdx];
+   g_recoveryHaltTime[toIdx] = g_recoveryHaltTime[fromIdx];
 }
 
 //+------------------------------------------------------------------+

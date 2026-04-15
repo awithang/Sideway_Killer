@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 20 \"C:\\\\Program Files\\\\MetaTrader 5\\\\metaeditor64.exe\" /compile \"SidewayKiller.mq5\" /s /log)",
+      "Bash(cd:*)",
+      "Bash(\"C:\\\\Program Files\\\\MetaTrader 5\\\\metaeditor64.exe\" /compile \"C:\\\\Users\\\\YocH-Dell\\\\AppData\\\\Roaming\\\\MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Sideway_Killer/SideWayKiller.mq5\")",
+      "Read(//c/Users/YocH-Dell/AppData/Roaming/MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/logs/**)",
+      "Bash(cp Modules/SK_FastStrike.mqh Modules/SK_Dashboard.mqh \"C:\\\\Users\\\\YocH-Dell\\\\AppData\\\\Roaming\\\\MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Sideway_Killer/Modules/\")",
+      "Bash(\"C:\\\\Program Files\\\\MetaTrader 5\\\\metaeditor64.exe\" /compile \"C:\\\\Users\\\\YocH-Dell\\\\AppData\\\\Roaming\\\\MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Sideway_Killer/SideWayKiller.mq5\" /log)",
+      "Bash(cp Modules/SK_Config.mqh \"C:\\\\Users\\\\YocH-Dell\\\\AppData\\\\Roaming\\\\MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/Sideway_Killer/Modules/\")",
+      "Bash(\"C:\\\\Program Files\\\\MetaTrader 5\\\\metaeditor64.exe\" /compile \"C:\\\\Users\\\\YocH-Dell\\\\AppData\\\\Roaming\\\\MetaQuotes/Terminal/D0E8209F77C8CF37AD8BF550E51FF075/MQL5/SidewayKiller/SideWayKiller.mq5\" /log)",
+      "Bash(metaeditor64 /compile:\"MQL5/Experts/Sideway_Killer.mq5\" /close)",
+      "Bash(cmd.exe /c \"C:\\\\Program Files\\\\MetaTrader 5\\\\metaeditor64.exe\" /compile:\"MQL5/Experts/Sideway_Killer.mq5\" /close)",
+      "Bash(where metaeditor64:*)",
+      "Bash(cmd.exe /c \"dir /s /b \"\"C:\\\\Program Files\\\\*MetaEditor*\"\" 2>nul | head -5\")"
+    ]
+  }
+}

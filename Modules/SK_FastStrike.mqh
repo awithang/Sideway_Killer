@@ -691,6 +691,20 @@ double FastStrike_CalcFinalProfit(const int basketIndex)
 }
 
 //+------------------------------------------------------------------+
+//| PARALLEL ARRAY COMPACT SUPPORT                                     |
+//+------------------------------------------------------------------+
+
+/**
+ * Shift Fast-Strike parallel arrays during basket compaction
+ * Called from SSoT_CompactBaskets()
+ */
+void FastStrike_ShiftBasketArrays(const int fromIdx, const int toIdx)
+{
+   g_fsApiCache[toIdx] = g_fsApiCache[fromIdx];
+   g_fsApiCacheTime[toIdx] = g_fsApiCacheTime[fromIdx];
+}
+
+//+------------------------------------------------------------------+
 //| COLD PATH — API Verification Cache (Layer 3 support)               |
 //| Refreshes cached API values for optional Layer 3 verification       |
 //| Called from OnTimer() — never from OnTick()                         |

@@ -198,8 +198,8 @@ bool                  g_userEmergencyEnabled = false;
 bool                  g_userInitiatedShutdown = false;
 datetime              g_eaInitTime = 0;
 
-//--- Grid cooldown tracker
-datetime              g_lastGridAddTime = 0;
+//--- Grid cooldown tracker (per-basket, see SK_Grid.mqh)
+// datetime           g_lastGridAddTime = 0;  // REMOVED: replaced by per-basket array
 
 //--- Indicator handles (initialized once, used throughout)
 int                   g_atrHandle14 = INVALID_HANDLE;

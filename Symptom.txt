@@ -1,0 +1,48 @@
+Debug Session: EA Total Functional Failure
+1. Issue: Active Basket "1 to 0" Reset
+
+Symptom: The dashboard detects an active basket on startup, but it immediately resets to 0. The internal cache is purged while physical trades remain open.
+
+Context: SK_SSoT.mqh (Functions: SSoT_LoadFromGlobals, SSoT_ReadBasketFromGlobals)
+
+Reproduction: Restart the EA with an open trade. The system reads the Global Variable, fails a minor validation check, and deletes the basket from memory.
+
+2. Issue: Total Recovery Execution Block (2,200-pt Drawdown)
+
+Symptom: No grid/recovery levels are opened even when the price is 2,200 points away from entry. The EA does not "adopt" the existing losing position.
+
+Context: SideWayKiller.mq5 (Logic Gate: Safety_IsOperationAllowed("GRID")) and SK_Safety.mqh.
+
+Reproduction: Run the EA on a high-volatility pair (XAUUSD). The 60-second spread stabilization timer never completes, causing a permanent "False" return that blocks all grid calculations.
+
+3. Issue: Target Profit & Close All Failure
+
+Symptom: The EA calculates profit correctly (e.g., $22 profit against a $10 target), but refuses to send a close order. The "Close All" button on the dashboard is also unresponsive.
+
+Context: SK_Dashboard.mqh and SK_FastStrike.mqh.
+
+Reproduction: Allow a basket to reach its profit target. The EA updates the UI but fails to execute OrderSend due to a disconnection between the SSoT cache and the Trade module.
+
+4. Issue: Broken Handover to Trailing Stop
+
+Symptom: The Trailing Stop module never activates. Baskets that reach the handover threshold are either closed prematurely or run indefinitely without peak tracking.
+
+Context: SK_TrailingStop.mqh (Function: Trailing_ManageBaskets) and SK_FastStrike.mqh (Handover Protocol).
+
+Reproduction: Achieve 95% of the target profit. The system fails to transfer the basket ID to the Trailing module because of incorrect valuePerPoint math.
+
+5. Issue: Dashboard UI Freeze & Data Discrepancy
+
+Symptom: P&L values on the dashboard do not update in real-time or show 0.00 despite active market movement and open positions.
+
+Context: SK_Dashboard.mqh (UI Update Cycle) and valuePerPoint calculation logic.
+
+Reproduction: Any active trade scenario. The UI is pulling data from stale or purged cache indices following the "Deduplication" process.
+
+6. Issue: Adoption Loop (Duplicate Baskets)
+
+Symptom: A single ticket (e.g., #115150941) is adopted multiple times, creating hundreds of redundant basket IDs in the Global Variables.
+
+Context: SK_Adoption.mqh and SK_SSoT.mqh (SSoT Refresh Cycle).
+
+Reproduction: Leave an orphaned trade open. The 5-second adoption scan triggers before the SSoT cache can confirm the ticket is already managed.

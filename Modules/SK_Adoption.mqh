@@ -271,13 +271,17 @@ void Adoption_ScanOrphansOnStartup()
       if(PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
 
-      //--- Skip if already adopted (persistent check)
-      if(Adoption_IsTicketAdopted(ticket))
-         continue;
-
-      //--- Skip if already in a basket (cache check)
+      //--- Skip if already in a basket (cache check) — FIRST
       if(Adoption_IsPositionInBasket(ticket))
          continue;
+
+      //--- Skip if already adopted ONLY when basket still exists.
+      // If the basket was lost (e.g. GV corruption) but ticket is still
+      // marked adopted, the cache check above already failed, so we
+      // MUST recover the orphan instead of skipping it.
+      // Normal runtime scans still block via Adoption_MeetsBaseCriteria().
+      // if(Adoption_IsTicketAdopted(ticket))
+      //    continue;
 
       //--- Skip if position is in profit
       double profit = PositionGetDouble(POSITION_PROFIT);

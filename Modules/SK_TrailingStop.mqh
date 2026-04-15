@@ -525,7 +525,8 @@ ENUM_ORDER_TYPE_FILLING Trailing_GetFillingMode()
  */
 void Trailing_UpdateAllVirtualTrailings(const double bid, const double ask)
 {
-   for(int i = 0; i < g_basketCount; i++)
+   //--- Reverse iteration prevents skip-after-compact bug
+   for(int i = g_basketCount - 1; i >= 0; i--)
      {
       if(!g_baskets[i].isValid)
          continue;
@@ -978,6 +979,24 @@ bool IsConnectionStable()
 }
 
 //+------------------------------------------------------------------+
+//| PARALLEL ARRAY COMPACT SUPPORT                                     |
+//+------------------------------------------------------------------+
+
+/**
+ * Shift trailing-related parallel arrays during basket compaction
+ * Called from SSoT_CompactBaskets()
+ */
+void Trailing_ShiftBasketArrays(const int fromIdx, const int toIdx)
+{
+   g_trailIsHandedOver[toIdx] = g_trailIsHandedOver[fromIdx];
+   g_trailProfitAtHandover[toIdx] = g_trailProfitAtHandover[fromIdx];
+   g_trailCurrentDist[toIdx] = g_trailCurrentDist[fromIdx];
+   g_trailMinimumStop[toIdx] = g_trailMinimumStop[fromIdx];
+   g_emergencyStopPlaced[toIdx] = g_emergencyStopPlaced[fromIdx];
+   g_emergencyStopPrice[toIdx] = g_emergencyStopPrice[fromIdx];
+}
+
+//+------------------------------------------------------------------+
 //| INTEGRATION: FastStrike with Instant Handover Protocol            |
 //| This function replaces FastStrikeCheck with instant handover logic |
 //| Called from OnTick() as the primary profit check entry point       |
@@ -1028,14 +1047,23 @@ bool FastStrikeCheckWithHandover()
       if(g_trailIsHandedOver[i])
          continue;
 
-      //--- Minimum age gate (original FastStrike)
-      if(now - g_baskets[i].created < Inp_MinBasketAge)
-         continue;
-
       double target = g_baskets[i].targetProfit;
 
       //=== API-FIRST: Live API profit is the PRIMARY decision source ===
       double apiProfit = GetBasketApiProfit(i);
+
+      //--- CRITICAL: INSTANT HANDOVER when API profit >= target
+      // NO age gate, NO math gate, ZERO delay — handover to trailing immediately
+      if(apiProfit >= target)
+        {
+         Trailing_HandOverToTrailing(i, apiProfit, bid, ask);
+         g_fsTotalChecks++;
+         return true;
+        }
+
+      //--- Minimum age gate (only for math-based paths)
+      if(now - g_baskets[i].created < Inp_MinBasketAge)
+         continue;
 
       //--- LAYER 1: Aggressive math check (advisory — does NOT block)
       double layer1 = FastStrike_CalcLayer1(i, bid, ask);
@@ -1053,9 +1081,6 @@ bool FastStrikeCheckWithHandover()
          if(!FastStrike_PreExecutionVerify(i, bid, ask, target))
             continue;
 
-         //--- CRITICAL: INSTANT HANDOVER when API profit >= target
-         // NO age gate, ZERO delay — handover to trailing immediately
-         // Trailing will set Break-Even stop to protect profit, then let trend run
          Trailing_HandOverToTrailing(i, apiProfit, bid, ask);
          g_fsTotalChecks++;
          return true;
