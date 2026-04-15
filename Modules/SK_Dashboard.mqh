@@ -12,6 +12,8 @@
 #include "SK_SSoT.mqh"
 #include "SK_Safety.mqh"
 #include "SK_Adoption.mqh"
+#include "SK_Grid.mqh"
+#include "SK_LotMultiplier.mqh"
 
 //+==================================================================+
 //| COMMAND CENTER DASHBOARD - Interactive Top-Right UI                |
@@ -41,7 +43,7 @@ input int    InpDashYOffset = 10;     // Dashboard Y offset from top
 #define DASH_PANEL_X_OFFSET  InpDashXOffset   // Pixels from right edge
 #define DASH_PANEL_Y_OFFSET  InpDashYOffset   // Pixels from top
 #define DASH_PANEL_WIDTH     320       // Panel width in pixels
-#define DASH_PANEL_HEIGHT    380       // Panel height
+#define DASH_PANEL_HEIGHT    460       // Panel height (expanded for basket info)
 #define DASH_MARGIN_LEFT     20        // Left margin inside panel (FIXED: was 8)
 #define DASH_ROW_HEIGHT      16        // Standard row height
 #define DASH_PANEL_BG_COLOR  C'20,20,20'
@@ -65,12 +67,16 @@ const int DASH_CLOSE_CONFIRM_WINDOW = 5;
 #define DASH_OBJ_PANEL     "SK_Dash_Panel"
 #define DASH_OBJ_HEADER    "SK_Dash_Header"
 #define DASH_OBJ_LIVE      "SK_Dash_Live_"
+#define DASH_OBJ_BASKET    "SK_Dash_Basket_"
 #define DASH_OBJ_HEAT      "SK_Dash_Heat_"
 #define DASH_OBJ_TRAIL     "SK_Dash_Trail_"
 #define DASH_OBJ_PERF      "SK_Dash_Perf_"
 #define DASH_OBJ_TRADE     "SK_Dash_Trade_"
 #define DASH_OBJ_EMERG     "SK_Dash_Emergency_"
 #define DASH_OBJ_STATUS    "SK_Dash_Status_"
+
+//--- Basket display configuration
+#define DASH_MAX_BASKET_ROWS 3         // Maximum baskets to display
 
 //+------------------------------------------------------------------+
 //| DASHBOARD STATE                                                    |
@@ -108,6 +114,7 @@ bool Dashboard_Init()
    Dashboard_CreatePanel();
    Dashboard_CreateHeader();
    Dashboard_CreateLiveMetrics();
+   Dashboard_CreateBasketInfo();
    Dashboard_CreateHeatMonitor();
    Dashboard_CreateTrailingTracker();
    Dashboard_CreatePerformanceMetrics();
@@ -320,13 +327,100 @@ double Dashboard_CalculateTotalFloatingPnL(const double bid, const double ask)
 }
 
 //+------------------------------------------------------------------+
-//| SECTION 1: HEAT MONITOR                                            |
+//| SECTION 1: BASKET INFO - Active Recovery Grid Preview              |
+//+------------------------------------------------------------------+
+
+void Dashboard_CreateBasketInfo()
+{
+   int left = g_dashBaseX - DASH_MARGIN_LEFT;   // 310
+   int row = g_dashBaseY + 95;                  // Position between Live Metrics and Heat Monitor
+
+   //--- Section header
+   Dashboard_CreateLabel(DASH_OBJ_BASKET + "Header", left, row,
+                         "[BASKETS] ACTIVE RECOVERY", clrGold,
+                         DASH_FONT_SIZE_BOLD, true, DASH_ZORDER_FG);
+   row += DASH_ROW_HEIGHT;
+
+   //--- Create 3 pre-allocated basket rows (initially empty/hidden)
+   for(int i = 0; i < DASH_MAX_BASKET_ROWS; i++)
+     {
+      string suffix = "_" + IntegerToString(i);
+      Dashboard_CreateLabel(DASH_OBJ_BASKET + "Row" + suffix, left, row,
+                            "", clrWhite, DASH_FONT_SIZE, false, DASH_ZORDER_FG);
+      row += DASH_ROW_HEIGHT;
+     }
+
+   row += 2;
+   Dashboard_CreateHLine(DASH_OBJ_BASKET + "Sep", g_dashBaseX, row, DASH_PANEL_WIDTH, clrDarkGray);
+}
+
+void Dashboard_UpdateBasketInfo()
+{
+   int displayedBaskets = 0;
+
+   for(int i = 0; i < g_basketCount; i++)
+     {
+      if(displayedBaskets >= DASH_MAX_BASKET_ROWS)
+         break;
+      if(!g_baskets[i].isValid)
+         continue;
+      if(g_baskets[i].status != BASKET_ACTIVE)
+         continue;
+
+      //--- Calculate next grid level info
+      int nextLevel = g_baskets[i].levelCount;
+      double nextGridDist = GetGridDistance(i, nextLevel);
+      double multiplier = GetLotMultiplier(i, nextLevel);
+      double baseLot = g_baskets[i].levels[0].lotSize;
+      double nextLot = Lot_Normalize(baseLot * multiplier);
+
+      //--- Calculate drawdown for context
+      double basketDD = g_heatCache[i];
+      double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      double ddPercent = (balance > 0) ? (basketDD / balance) * 100.0 : 0.0;
+
+      //--- Build display string
+      string direction = (g_baskets[i].direction == 0) ? "BUY" : "SELL";
+      string text = "#" + IntegerToString(g_baskets[i].basketId) + " " +
+                    direction + " L" + IntegerToString(nextLevel) +
+                    " | DD:$" + DoubleToString(basketDD, 2) +
+                    " | Next:" + DoubleToString(nextGridDist, 1) + "pts" +
+                    " @" + DoubleToString(nextLot, 2) + "lot";
+
+      //--- Update row
+      string suffix = "_" + IntegerToString(displayedBaskets);
+      ObjectSetString(0, DASH_OBJ_BASKET + "Row" + suffix, OBJPROP_TEXT, text);
+
+      //--- Color coding for drawdown
+      color rowColor = clrWhite;
+      if(ddPercent > 5.0)
+         rowColor = clrCrimson;
+      else if(ddPercent > 2.0)
+         rowColor = clrOrange;
+      else if(basketDD < 0)
+         rowColor = clrLimeGreen;
+
+      ObjectSetInteger(0, DASH_OBJ_BASKET + "Row" + suffix, OBJPROP_COLOR, rowColor);
+
+      displayedBaskets++;
+     }
+
+   //--- Hide unused rows
+   for(int i = displayedBaskets; i < DASH_MAX_BASKET_ROWS; i++)
+     {
+      string suffix = "_" + IntegerToString(i);
+      ObjectSetString(0, DASH_OBJ_BASKET + "Row" + suffix, OBJPROP_TEXT, "");
+     }
+}
+
+//+------------------------------------------------------------------+
+//| SECTION 2: HEAT MONITOR                                            |
 //+------------------------------------------------------------------+
 
 void Dashboard_CreateHeatMonitor()
 {
    int left = g_dashBaseX - DASH_MARGIN_LEFT;   // 310
-   int row = g_dashBaseY + 90;
+   int row = g_dashBaseY + 180;                 // Shifted down for basket info section
 
    Dashboard_CreateLabel(DASH_OBJ_HEAT + "Header", left, row,
                          "[HEAT] MONITOR", clrOrange,
@@ -368,7 +462,7 @@ void Dashboard_UpdateHeatMonitor()
 void Dashboard_CreateTrailingTracker()
 {
    int left = g_dashBaseX - DASH_MARGIN_LEFT;   // 310
-   int row = g_dashBaseY + 135;
+   int row = g_dashBaseY + 230;                 // Shifted down for basket info section
 
    Dashboard_CreateLabel(DASH_OBJ_TRAIL + "Header", left, row,
                          "[TRAIL] TREND TRACKER", clrLightGreen,
@@ -425,7 +519,7 @@ void Dashboard_UpdateTrailingTracker()
 void Dashboard_CreatePerformanceMetrics()
 {
    int left = g_dashBaseX - DASH_MARGIN_LEFT;   // 310
-   int row = g_dashBaseY + 180;
+   int row = g_dashBaseY + 280;                 // Shifted down for basket info section
 
    Dashboard_CreateLabel(DASH_OBJ_PERF + "Header", left, row,
                          "[STATS] PERFORMANCE", clrLightBlue,
@@ -475,7 +569,7 @@ void Dashboard_UpdatePerformanceMetrics()
 void Dashboard_CreateTradeControls()
 {
    int left = g_dashBaseX - DASH_MARGIN_LEFT;   // 310
-   int row = g_dashBaseY + 225;
+   int row = g_dashBaseY + 330;                 // Shifted down for basket info section
 
    Dashboard_CreateLabel(DASH_OBJ_TRADE + "Header", left, row,
                          "[TRADE] MANUAL CONTROLS", clrLightGreen,
@@ -513,7 +607,7 @@ void Dashboard_UpdateTradeControls()
 void Dashboard_CreateEmergencyControls()
 {
    int left = g_dashBaseX - DASH_MARGIN_LEFT;   // 310
-   int row = g_dashBaseY + 280;
+   int row = g_dashBaseY + 385;                 // Shifted down for basket info section
 
    Dashboard_CreateLabel(DASH_OBJ_EMERG + "Header", left, row,
                          "[EMERG] EMERGENCY CONTROLS", clrRed,
@@ -555,7 +649,7 @@ void Dashboard_UpdateEmergencyControls()
 void Dashboard_CreateSystemStatus()
 {
    int left = g_dashBaseX - DASH_MARGIN_LEFT;   // 310
-   int row = g_dashBaseY + 330;
+   int row = g_dashBaseY + 425;                 // Shifted down for basket info section
 
    Dashboard_CreateLabel(DASH_OBJ_STATUS + "Header", left, row,
                          "[SYS] SYSTEM STATUS", clrLightGray,
@@ -620,6 +714,7 @@ void Dashboard_UpdateSystemStatus()
 void Dashboard_FullUpdate()
 {
    Dashboard_UpdateHeatMonitor();
+   Dashboard_UpdateBasketInfo();
    Dashboard_UpdateTrailingTracker();
    Dashboard_UpdatePerformanceMetrics();
    Dashboard_UpdateTradeControls();
