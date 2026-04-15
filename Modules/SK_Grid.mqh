@@ -371,6 +371,10 @@ ENUM_VOL_REGIME Grid_DetectRegime(const double atr)
  */
 void CheckGridLevels(const double bid, const double ask)
 {
+   static datetime s_lastAuditTime = 0;
+   datetime now = TimeCurrent();
+   bool auditThrottled = (now == s_lastAuditTime);
+
    for(int i = 0; i < g_basketCount; i++)
      {
       if(!g_baskets[i].isValid)
@@ -378,27 +382,84 @@ void CheckGridLevels(const double bid, const double ask)
       if(g_baskets[i].status != BASKET_ACTIVE)
          continue;
 
+      int nextLevel = g_baskets[i].levelCount;
+      double nextGridDist = GetGridDistance(i, nextLevel);
+      bool shouldAdd = Grid_ShouldAddLevel(i, bid, ask);
+      double basketHeat = Safety_GetBasketHeat(i);
+      int cooldownRemaining = (g_basketLastGridAddTime[i] > 0) ?
+                              (DEF_GRID_COOLDOWN_SECONDS - (int)(TimeCurrent() - g_basketLastGridAddTime[i])) : 0;
+
+      //--- ALWAYS print when execution is about to happen (rare event)
+      //--- For blockers, use a global 1-second throttle to avoid tick spam
+
       //--- Per-basket cooldown check
       if(g_basketLastGridAddTime[i] > 0 &&
          (TimeCurrent() - g_basketLastGridAddTime[i]) < DEF_GRID_COOLDOWN_SECONDS)
+        {
+         if(!auditThrottled)
+           {
+            Print("[AUDIT] Basket ", g_baskets[i].basketId,
+                  " BLOCKED: Cooldown (", cooldownRemaining, "s left)");
+            s_lastAuditTime = now;
+           }
          continue;
+        }
 
       //--- Skip if already at max levels
       if(g_baskets[i].levelCount >= Inp_MaxGridLevels)
+        {
+         if(!auditThrottled)
+           {
+            Print("[AUDIT] Basket ", g_baskets[i].basketId,
+                  " BLOCKED: Max levels (", Inp_MaxGridLevels, ")");
+            s_lastAuditTime = now;
+           }
          continue;
+        }
       if(g_baskets[i].levelCount >= SK_MAX_LEVELS)
+        {
+         if(!auditThrottled)
+           {
+            Print("[AUDIT] Basket ", g_baskets[i].basketId,
+                  " BLOCKED: Hard max levels (", SK_MAX_LEVELS, ")");
+            s_lastAuditTime = now;
+           }
          continue;
+        }
 
       //--- Check per-basket recovery heat limit (Phase 6 safety)
       if(!Safety_EnforceRecoveryHeatLimit(i))
-         continue;  // This basket is recovery-halted
+        {
+         if(!auditThrottled)
+           {
+            Print("[AUDIT] Basket ", g_baskets[i].basketId,
+                  " BLOCKED: Heat (", DoubleToString(basketHeat, 2), "% > ", Inp_MaxRecoveryHeat, ")");
+            s_lastAuditTime = now;
+           }
+         continue;
+        }
 
       //--- Check if this basket qualifies for a new level
-      if(Grid_ShouldAddLevel(i, bid, ask))
+      if(shouldAdd)
         {
+         Print("[AUDIT] Basket ", g_baskets[i].basketId,
+               " EXECUTING Grid_AddLevel | NextDist:", DoubleToString(nextGridDist, 1), "pts",
+               " | Heat:", DoubleToString(basketHeat, 2), "%",
+               " | Levels:", g_baskets[i].levelCount, "/", Inp_MaxGridLevels);
          Grid_AddLevel(i, bid, ask);
          //--- Only one level per tick cycle to respect cooldown
          return;
+        }
+      else
+        {
+         //--- Throttled "alive" log to prove CheckGridLevels is running
+         if(!auditThrottled)
+           {
+            Print("[AUDIT] Basket ", g_baskets[i].basketId,
+                  " WAITING | NextDist:", DoubleToString(nextGridDist, 1), "pts",
+                  " | Heat:", DoubleToString(basketHeat, 2), "%");
+            s_lastAuditTime = now;
+           }
         }
      }
 }
@@ -429,18 +490,22 @@ bool Grid_ShouldAddLevel(const int basketIndex, const double bid, const double a
    int nextLevel = g_baskets[basketIndex].levelCount;
    double requiredSpacing = GetGridDistance(basketIndex, nextLevel);
 
+   //--- Convert points to price distance (CRITICAL: XAUUSD tickSize = 0.01)
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double requiredPriceDistance = requiredSpacing * tickSize;
+
    //--- Check if price has moved far enough
    double priceDistance;
 
    if(direction == 0)  // BUY basket — price must drop below last level
      {
       priceDistance = lastPrice - bid;
-      return (priceDistance >= requiredSpacing);
+      return (priceDistance >= requiredPriceDistance);
      }
    else  // SELL basket — price must rise above last level
      {
       priceDistance = ask - lastPrice;
-      return (priceDistance >= requiredSpacing);
+      return (priceDistance >= requiredPriceDistance);
      }
 }
 

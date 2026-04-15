@@ -132,15 +132,24 @@ void OnTick()
    g_dashboard.currentAsk = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
    //--- PRIORITY 1: Fast-Strike with handover (FIRST)
-   if(FastStrikeCheckWithHandover())
-      return;
+   //--- Handover does NOT close baskets, so we continue to process other baskets
+   FastStrikeCheckWithHandover();
 
    //--- PRIORITY 2: Virtual Trailing
    Trailing_UpdateAllVirtualTrailings(g_dashboard.currentBid, g_dashboard.currentAsk);
 
    //--- PRIORITY 3: Grid Level checks (safety-guarded)
    if(!Safety_IsOperationAllowed("GRID"))
+     {
+      static datetime s_lastSpreadAudit = 0;
+      if(TimeCurrent() != s_lastSpreadAudit)
+        {
+         long currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+         Print("[AUDIT] OnTick GRID blocked | Spread:", currentSpread, "pts (Limit:", DEF_MAX_SPREAD_POINTS, ")");
+         s_lastSpreadAudit = TimeCurrent();
+        }
       return;
+     }
 
    CheckGridLevels(g_dashboard.currentBid, g_dashboard.currentAsk);
 }
