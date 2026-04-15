@@ -142,10 +142,13 @@ void OnTick()
    if(!Safety_IsOperationAllowed("GRID"))
      {
       static datetime s_lastSpreadAudit = 0;
-      if(TimeCurrent() != s_lastSpreadAudit)
+      if(TimeCurrent() - s_lastSpreadAudit >= 60)
         {
-         long currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-         Print("[AUDIT] OnTick GRID blocked | Spread:", currentSpread, "pts (Limit:", DEF_MAX_SPREAD_POINTS, ")");
+         if(Inp_EnableAuditLog)
+           {
+            long currentSpread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+            Print("[AUDIT] OnTick GRID blocked | Spread:", currentSpread, "pts (Limit:", DEF_MAX_SPREAD_POINTS, ")");
+           }
          s_lastSpreadAudit = TimeCurrent();
         }
       return;

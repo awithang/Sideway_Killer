@@ -371,9 +371,9 @@ ENUM_VOL_REGIME Grid_DetectRegime(const double atr)
  */
 void CheckGridLevels(const double bid, const double ask)
 {
-   static datetime s_lastAuditTime = 0;
+   static datetime s_lastAuditTime[SK_MAX_BASKETS];
+   static int      s_lastAuditState[SK_MAX_BASKETS];
    datetime now = TimeCurrent();
-   bool auditThrottled = (now == s_lastAuditTime);
 
    for(int i = 0; i < g_basketCount; i++)
      {
@@ -389,18 +389,20 @@ void CheckGridLevels(const double bid, const double ask)
       int cooldownRemaining = (g_basketLastGridAddTime[i] > 0) ?
                               (DEF_GRID_COOLDOWN_SECONDS - (int)(TimeCurrent() - g_basketLastGridAddTime[i])) : 0;
 
-      //--- ALWAYS print when execution is about to happen (rare event)
-      //--- For blockers, use a global 1-second throttle to avoid tick spam
+      int currentState = 0;  // 0=waiting, 1=cooldown, 2=maxlevels, 3=hardmax, 4=heat
 
       //--- Per-basket cooldown check
       if(g_basketLastGridAddTime[i] > 0 &&
          (TimeCurrent() - g_basketLastGridAddTime[i]) < DEF_GRID_COOLDOWN_SECONDS)
         {
-         if(!auditThrottled)
+         currentState = 1;
+         bool shouldPrint = (currentState != s_lastAuditState[i]) || (now - s_lastAuditTime[i] >= 60);
+         if(shouldPrint && Inp_EnableAuditLog)
            {
             Print("[AUDIT] Basket ", g_baskets[i].basketId,
                   " BLOCKED: Cooldown (", cooldownRemaining, "s left)");
-            s_lastAuditTime = now;
+            s_lastAuditState[i] = currentState;
+            s_lastAuditTime[i] = now;
            }
          continue;
         }
@@ -408,21 +410,27 @@ void CheckGridLevels(const double bid, const double ask)
       //--- Skip if already at max levels
       if(g_baskets[i].levelCount >= Inp_MaxGridLevels)
         {
-         if(!auditThrottled)
+         currentState = 2;
+         bool shouldPrint = (currentState != s_lastAuditState[i]) || (now - s_lastAuditTime[i] >= 60);
+         if(shouldPrint && Inp_EnableAuditLog)
            {
             Print("[AUDIT] Basket ", g_baskets[i].basketId,
                   " BLOCKED: Max levels (", Inp_MaxGridLevels, ")");
-            s_lastAuditTime = now;
+            s_lastAuditState[i] = currentState;
+            s_lastAuditTime[i] = now;
            }
          continue;
         }
       if(g_baskets[i].levelCount >= SK_MAX_LEVELS)
         {
-         if(!auditThrottled)
+         currentState = 3;
+         bool shouldPrint = (currentState != s_lastAuditState[i]) || (now - s_lastAuditTime[i] >= 60);
+         if(shouldPrint && Inp_EnableAuditLog)
            {
             Print("[AUDIT] Basket ", g_baskets[i].basketId,
                   " BLOCKED: Hard max levels (", SK_MAX_LEVELS, ")");
-            s_lastAuditTime = now;
+            s_lastAuditState[i] = currentState;
+            s_lastAuditTime[i] = now;
            }
          continue;
         }
@@ -430,11 +438,14 @@ void CheckGridLevels(const double bid, const double ask)
       //--- Check per-basket recovery heat limit (Phase 6 safety)
       if(!Safety_EnforceRecoveryHeatLimit(i))
         {
-         if(!auditThrottled)
+         currentState = 4;
+         bool shouldPrint = (currentState != s_lastAuditState[i]) || (now - s_lastAuditTime[i] >= 60);
+         if(shouldPrint && Inp_EnableAuditLog)
            {
             Print("[AUDIT] Basket ", g_baskets[i].basketId,
                   " BLOCKED: Heat (", DoubleToString(basketHeat, 2), "% > ", Inp_MaxRecoveryHeat, ")");
-            s_lastAuditTime = now;
+            s_lastAuditState[i] = currentState;
+            s_lastAuditTime[i] = now;
            }
          continue;
         }
@@ -452,13 +463,15 @@ void CheckGridLevels(const double bid, const double ask)
         }
       else
         {
-         //--- Throttled "alive" log to prove CheckGridLevels is running
-         if(!auditThrottled)
+         currentState = 0;
+         bool shouldPrint = (currentState != s_lastAuditState[i]) || (now - s_lastAuditTime[i] >= 60);
+         if(shouldPrint && Inp_EnableAuditLog)
            {
             Print("[AUDIT] Basket ", g_baskets[i].basketId,
                   " WAITING | NextDist:", DoubleToString(nextGridDist, 1), "pts",
                   " | Heat:", DoubleToString(basketHeat, 2), "%");
-            s_lastAuditTime = now;
+            s_lastAuditState[i] = currentState;
+            s_lastAuditTime[i] = now;
            }
         }
      }

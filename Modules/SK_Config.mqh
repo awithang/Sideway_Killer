@@ -265,4 +265,7 @@ input double     Inp_MaxTotalHeat      = 10.0;            // Max total heat %
 input int        Inp_MaxConcurrentBaskets = 3;            // Max baskets
 input int        Inp_MaxGridLevels     = SK_MAX_LEVELS;   // Max grid levels per basket
 
+input string     Inp_Separator14       = "--- AUDIT LOGS ---";
+input bool       Inp_EnableAuditLog    = false;           // Enable [AUDIT] grid debug logs
+
 //+------------------------------------------------------------------+
